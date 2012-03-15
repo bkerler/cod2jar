@@ -1,0 +1,19 @@
+Building services are provided by python's distutils.  To install, simply execute the following:
+
+    python setup.py install
+    
+The following dependencies are required:
+    python 2.*
+    Java SDK
+    Jasmin
+
+The following dependencies may be required for advanced cod analysis features:
+    wxPython
+    A GDL viewer like IDA Pro's Qwingraph
+    networkx
+
+Consider adding the following directories to your PATH:
+    The "Scripts" folder in the Python directory
+    The directory containing "jasmin.jar"
+    The directory containing "java"
+    The directory containing "qwingraph.exe" (if you want to graph bytecode assembly)
