@@ -518,7 +518,7 @@ class ClassDumper(object):
         self._force_update = force_update
         # find jasmin.jar in the PATH environment variable
         self._jasmin_path = None
-        for path in os.environ['PATH'].split(';'):
+        for path in os.environ['PATH'].split(os.pathsep):
             path = os.path.join(path, 'jasmin.jar')
             if os.path.isfile(path):
                 self._jasmin_path = path
