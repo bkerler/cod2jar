@@ -32,7 +32,6 @@ system dependencies or standard libraries).
 import os, sys, traceback, glob, time, zipfile
 from optparse import OptionParser
 from StringIO import StringIO
-from zipfile import ZipFile
 import codlib
 
 class Progress(object):
@@ -69,9 +68,10 @@ class Progress(object):
             eta
         ))
 
-class NewMake(object):
+class Cod2Jar(object):
 
     DUMP_FORMATS = [
+        'cache',
         'text',
         'xml',
         'jasmin',
@@ -80,9 +80,26 @@ class NewMake(object):
     ]
 
     def __init__(self, cods, options):
+        # figure out what format we are dumping in
+        format = options.format.lower()
+        if format not in self.DUMP_FORMATS:
+            print >>sys.stderr, "Dump format '%s' not supported" % format
+            sys.exit()
+        else:
+            self._module_dumper = getattr(self, "do_%s_dump" % format)
+            self._format = format
+
         self._out_path = os.path.abspath(options.out_path)
-        if self._out_path.endswith('.jar'):
-            self._out_path = self._out_path[:-4]
+        # you must not be understanding me...
+        if self._out_path.endswith('.jar') or \
+           self._out_path.endswith('.zip') or \
+           self._out_path.endswith('.xml') or \
+           self._out_path.endswith('.txt') or \
+           self._out_path.endswith('.text') or \
+           self._out_path.endswith('.j') or \
+           self._out_path.endswith('.jasmin') or \
+           self._out_path.endswith('.class'):
+            self._out_path = '.'.join(self._out_path.split('.')[:-1])
 
         # Slight race condition
         if not os.path.exists(self._out_path):
@@ -91,6 +108,12 @@ class NewMake(object):
         self._make_log = open(os.path.join(self._out_path, "cod2jar.log"), 'wt')
         self._loader_log = open(os.path.join(self._out_path, "loader.log"), 'wt')
         self._hiscan_log = open(os.path.join(self._out_path, "hiscan.log"), 'wt')
+
+        # dump mode
+        self.individual_mode = options.individual_mode
+        if self._format == 'cache':
+            self.individual_mode = True
+            self.log("WARNING: reverting to individual dump mode for cache creation")
 
         # Expand the list of COD files
         if (len(cods) == 1) and (cods[0].lower() == 'all'):
@@ -108,7 +131,10 @@ class NewMake(object):
             self._cods = all_cods
 
         # Check all our search paths
-        load_paths = []
+        if (len(cods) == 1) and (cods[0].lower() == 'all'):
+            self._load_paths = []
+        else:
+            self._load_paths = cods
         for lp in options.load_path.split(';'):
             if not lp:
                 continue    # Skip empty items
@@ -117,9 +143,12 @@ class NewMake(object):
             elif not os.path.isdir(lp):
                 self.log("WARNING: load path '%s' isn't a directory; ignoring..." % lp)
             else:
-                load_paths.append(lp)
+                self._load_paths.append(lp)
 
-        # Minor race condition here; don't run 2 NewMakes targeting the same cache root at the same time!
+        # force our cache to always be read-only
+        self._read_only = True
+        self._cache_root = None
+        # Minor race condition here; don't run 2 cod2jars targeting the same cache root at the same time!
         if options.cache_root is not None:
             cache_root = os.path.abspath(options.cache_root)
             if (cache_root is not None) and (not os.path.exists(cache_root)):
@@ -133,8 +162,8 @@ class NewMake(object):
                     else:
                         self.log("WARNING: invalid cache path; '%s' is neither a folder or a Zip; ignoring..." % cache_root)
                         cache_root = None
-                else:
-                    self._read_only = options.read_only
+                #else:
+                #    self._read_only = options.read_only
             self._cache = (cache_root is not None)
         else:
             cache_root = None
@@ -153,43 +182,26 @@ class NewMake(object):
         self._names = (name_db is not None)
 
         self._loader = codlib.Loader(
-            load_paths,
-            cache_root=cache_root,
-            name_db_path=name_db,
-            auto_resolve=False,
+            self._load_paths,
+            cache_root=self._cache_root,
+            name_db_path=self._names,
+            auto_resolve=self.individual_mode,
             log_file=self._loader_log
         )
 
-        format = options.format.lower()
-        if format is not None:
-            if format not in self.DUMP_FORMATS:
-                self.log("WARNING: dump format '%s' not supported; ignoring..."% format)
-                format = None
-            else:
-                self._module_dumper = getattr(self, "do_%s_dump" % format)
-                self._format = format
-        self._dump = (format is not None)
-
-        self._no_update = options.no_update
+        #self._no_update = options.no_update
         self._hiscan = options.hiscan
         self._parse_only = False
         if self._format == 'xml':
             # we do not need to take the time to hiscan or resolve when dumping XML!
             self._parse_only = True
 
-        zip_cache = options.zip_cache
-        if (zip_cache is not None) and (not self._cache):
-            self.log("WARNING: '-z' option specified with no cache selected; ignoring...")
-            zip_cache = None
-        self._zip_cache = zip_cache
-
     def log(self, msg):
         print >> self._make_log, msg
 
     def diagnostics(self):
         print "INPUT: %d CODs to parse." % len(self._cods)
-        if self._dump:
-            print "Dumping output to '%s' in '%s' format" % (self._out_path, self._format)
+        print "Dumping output to '%s' in '%s' format" % (self._out_path, self._format)
         if self._cache:
             print "Caching enabled (cache root: '%s')" % self._cache_root
         if self._names:
@@ -207,11 +219,16 @@ class NewMake(object):
             XD = codlib.XMLDumper(fd, self._make_log)
             XD.dump_cod(module._cf)
 
+    def do_cache_dump(self, module):
+        SD = codlib.SerialDumper(self._out_path, self._make_log)
+        SD.dump_module(module)
+
     def do_jasmin_dump(self, module):
         try:
             JD = self._jasmin_dumper
         except AttributeError:
-            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
+            #self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
+            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log)
 
         for cdef in module.classes:
             JD.dump_class(cdef)
@@ -220,12 +237,14 @@ class NewMake(object):
         try:
             JD = self._jasmin_dumper
         except AttributeError:
-            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
+            #self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
+            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log)
 
         try:
             CD = self._class_dumper
         except AttributeError:
-            self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log, self._no_update)
+            #self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log, self._no_update)
+            self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log)
 
         error = None
         for cdef in module.classes:
@@ -288,9 +307,20 @@ class NewMake(object):
         print
         return loaded_mods
 
-        return map(self._loader.load_module, mods)
-
     def run(self):
+        if self.individual_mode:
+            self.run_individual_mode()
+        else:
+            self.run_batch_mode()
+
+    def run_batch_mode(self):
+        """ Perform the steps in order and on all CODs.  For example,
+            Parse all CODs, then resolve all CODs, then hiscan all
+            CODs, then dump all CODs.  This is much more visually
+            appealing than performing these steps on a COD-by-COD
+            basis, but we can easily run out of memory by batch
+            processing a large group of CODs.
+        """
         # Parse (but do not resolve, yet) all the cods we have
         if self._cods is None:
             # Magic shortcut to simply load all cached modules
@@ -369,6 +399,8 @@ class NewMake(object):
                 H.dump_bad_subs()
 
             # If caching is enabled (and not read-only), dump our loaded modules into the cache
+            # temporarily disabled to make things simpler
+            """
             if self._cache and (not self._read_only):
                 P = Progress("Caching classes", num_classes)
                 ticks = 0
@@ -385,62 +417,119 @@ class NewMake(object):
                         ticks += len(m.classes)
                         P.update(ticks)
                 print
-
-            # If '-z' was [successfully] enabled, compress the cache directory to the given spot
-            if self._zip_cache:
-                items = []
-                cache_root = self._cache_root
-                for root, dirs, files in os.walk(cache_root):
-                    for f in files:
-                        if f.endswith('.cache') or f.endswith('.db'):
-                            items.append(os.path.join(root, f))
-                Z = zipfile.ZipFile(self._zip_cache, 'w', zipfile.ZIP_DEFLATED)
-                try:
-                    P = Progress("Compressing files", len(items))
-                    ticks = 0
-                    P.update(ticks)
-                    for item in items:
-                        Z.write(item, os.path.relpath(item, cache_root))
-                        ticks += 1
-                        P.update(ticks)
-                    print
-                except Exception as err:
-                    self.log("ERROR: failed to compress cache")
-                    traceback.print_exc(file=self._make_log)
-                finally:
-                    Z.close()
+            """
 
         # Finally, generate our human-readable output (text dump, jasmin source, whatever)
         errors = 0
-        if self._dump:
-            P = Progress("Dumping classes in '%s' format" % self._format, num_classes)
-            ticks = 0
-            P.update(ticks)
-            for m in loaded_cods:
-                try:
-                    self._module_dumper(m)
-                except KeyboardInterrupt:
-                    raise
-                except Exception as err:
-                    errors += 1
-                    self.log("ERROR: failed to dump module %s in '%s' format" % (m, self._format))
-                    traceback.print_exc(file=self._make_log)
-                finally:
-                    ticks += len(m.classes)
-                    P.update(ticks)
-            if self._format == 'jar':
-                zf = ZipFile(self._out_path + '.jar', 'w')
-                for dirpath, dirnames, filenames in os.walk(self._out_path):
-                    for filename in filenames:
-                        source_file_path = os.path.join(dirpath, filename)
-                        relpath = os.path.relpath(source_file_path, self._out_path)
-                        if filename.endswith('.class'):
-                            zf.write(source_file_path, relpath)
-                zf.close()
-            if errors:
-                print
-                print 'There were %d errors while dumping modules.  See the log files in "%s" for details.' % (errors, self._out_path)
+        P = Progress("Dumping classes in '%s' format" % self._format, num_classes)
+        ticks = 0
+        P.update(ticks)
+        for m in loaded_cods:
+            try:
+                self._module_dumper(m)
+            except KeyboardInterrupt:
+                raise
+            except Exception as err:
+                errors += 1
+                self.log("ERROR: failed to dump module %s in '%s' format" % (m, self._format))
+                traceback.print_exc(file=self._make_log)
+            finally:
+                ticks += len(m.classes)
+                P.update(ticks)
+
+        self.wrap_up()
+        if errors:
             print
+            print 'There were %d errors while dumping modules.  See the log files in "%s" for details.' % (errors, self._out_path)
+        print
+
+    def run_individual_mode(self):
+        """ Individual mode performs all steps on an individual COD
+            basis.  This is helpful for processing large batches of
+            COD files where we could easily run out of memory.
+            If we do run out of memory, we simply clear out the
+            loader and try again on the current module.
+        """
+        cods_to_dump = self._cods
+        cods_to_dump.sort()
+
+        errors = 0
+        P = Progress("Dumping modules", len(cods_to_dump))
+        ticks = 0
+        P.update(ticks)
+        retry = False
+        while cods_to_dump and not retry:
+            if retry:
+                retry = False
+            else:
+                cod_name = cods_to_dump.pop(0)
+                self.log("Dumping '%s'" % os.path.basename(cod_name))
+            try:
+                # resolve, actualize, disassemble
+                m = self._loader.load_module(cod_name).resolve().actualize().disasm()
+                # hiscan if we need to
+                if self._hiscan:
+                    H = codlib.HIScanner(self._loader, self._hiscan_log)
+                    for rdef in m.routines:
+                        try:
+                            sub = codlib.Subroutine(rdef)
+                            H.scan(sub)
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception as err:
+                            self.log("ERROR: failed to finish scanning routine '%s'..." % rdef)
+                            traceback.print_exc(file=self._make_log)
+                # dump
+                self._module_dumper(m)
+
+                ticks += 1
+                P.update(ticks)
+            except MemoryError:
+                # urgh, ran out of memory, throw it all away...
+                del self._loader
+                self.log("WARNING: ran out of memory on module '%s', refreshing loader..." % cod_name)
+                self._loader = codlib.Loader(
+                    self._load_paths,
+                    cache_root=self._cache_root,
+                    name_db_path=self._names,
+                    auto_resolve=True,
+                    log_file=self._loader_log
+                )
+                retry = True
+            except KeyboardInterrupt:
+                raise
+            except Exception as err:
+                self.log("ERROR: failed to dump COD '%s'..." % cod_name)
+                traceback.print_exc(file=self._make_log)
+                errors += 1
+
+        self.wrap_up()
+        if errors:
+            print
+            print 'There were %d errors while dumping modules.  See the log files in "%s" for details.' % (errors, self._out_path)
+        print
+
+    def wrap_up(self):
+        # for jar and cache formats we need to zip up our results
+        # after dumping the modules
+        if self._format == 'jar':
+            zf = zipfile.ZipFile(self._out_path + '.jar', 'w')
+            for dirpath, dirnames, filenames in os.walk(self._out_path):
+                for filename in filenames:
+                    source_file_path = os.path.join(dirpath, filename)
+                    relpath = os.path.relpath(source_file_path, self._out_path)
+                    if filename.endswith('.class'):
+                        zf.write(source_file_path, relpath)
+            zf.close()
+        elif self._format == 'cache':
+            zf = zipfile.ZipFile(self._out_path + '.zip', 'w')
+            for dirpath, dirnames, filenames in os.walk(self._out_path):
+                for filename in filenames:
+                    source_file_path = os.path.join(dirpath, filename)
+                    relpath = os.path.relpath(source_file_path, self._out_path)
+                    if filename.endswith('.cache') or filename.endswith('.db'):
+                        zf.write(source_file_path, relpath)
+            zf.close()
 
 
 if __name__ == "__main__":
@@ -449,23 +538,30 @@ if __name__ == "__main__":
                     help="semi-colon-delimited list of FOLDERS from which to load COD dependencies")
     OP.add_option("-c", "--cache-root", dest="cache_root", default=None, metavar="FOLDER",
                     help="use FOLDER as a class/module cache dump (for loading/storing)")
-    OP.add_option("-r", "--read-only", dest="read_only", action="store_true", default=False,
-                    help="treat cache as read-only (i.e., do not update the cache)")
+    #OP.add_option("-r", "--read-only", dest="read_only", action="store_true", default=False,
+    #                help="treat cache as read-only (i.e., do not update the cache)")
     OP.add_option("-n", "--name-db", dest="name_db", default=None, metavar="DB_FILE",
                     help="use DB_FILE field/method name database to rename stripped class members")
-    OP.add_option("-o", "--output", dest="out_path", default=".", metavar="PATH",
+    OP.add_option("-o", "--output", dest="out_path", default="", metavar="PATH",
                     help="save output dump in PATH")
     OP.add_option("-f", "--format", dest="format", default="jar", metavar="FORMAT",
-                    help="generate output dump a specific FORMAT: [%s]" % ', '.join(NewMake.DUMP_FORMATS))
-    OP.add_option("-x", "--no-update", dest="no_update", action="store_false", default=True,
-                    help="Do not update dump files if they already exist")
+                    help="generate output dump a specific FORMAT: [%s]" % ', '.join(Cod2Jar.DUMP_FORMATS))
+    OP.add_option("-i", "--individual-mode", dest="individual_mode", action="store_true", default=False,
+                    help="Dumping mode resistant to running low on memory, yet less informative")
+    #OP.add_option("-x", "--no-update", dest="no_update", action="store_false", default=True,
+    #                help="Do not update dump files if they already exist (always perform a backup if in doubt)")
     OP.add_option("-s", "--no-hiscan", dest="hiscan", action="store_false", default=True,
-                    help="Use heuristic instruction scanning to resolve dynamic type information")
-    OP.add_option("-z", "--zip-cache", dest="zip_cache", default=None, metavar="ZIPFILE",
-                    help="compress cache into ZIPFILE after completing job")
+                    help="Do not use heuristic instruction scanning to resolve dynamic type information")
+    #OP.add_option("-z", "--zip-cache", dest="zip_cache", default=None, metavar="ZIPFILE",
+    #                help="compress cache into ZIPFILE after completing job")
     opts, args = OP.parse_args()
 
     if len(args) == 0:
         OP.print_help()
         OP.error("Must specify at least one input COD file/folder (or the magic cache flag 'ALL')")
-    NewMake(args, opts).run()
+    if not opts.out_path:
+        OP.error('Must specify an output path')
+    if os.path.exists(opts.out_path):
+        OP.error("'%s' already exists!" % opts.out_path)
+
+    Cod2Jar(args, opts).run()
