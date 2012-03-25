@@ -339,6 +339,7 @@ class HIScanner(object):
             if c in visited or c in failed:
                 parents_tstack = self._get_starting_tstacks(c)
                 parents_tlocals = self._get_starting_tlocals(c)
+                # TODO: improve with stack map info
                 parents_merged_tstack = self._merge_tlists(parents_tstack, no_fail = True)
                 parents_merged_tlocals = self._merge_tlists(parents_tlocals, no_fail = True)
 
@@ -499,9 +500,8 @@ class HIScanner(object):
                     # we can compare to see if we have better info
                     bb.starting_tstack = tstack.copy()
                     bb.starting_tlocals = tlocals[:]
-                    # TODO: comment
-                    self.log("DEBUG: starting stack: %s" % bb.starting_tstack)
-                    self.log("DEBUG: starting locals: %s" % bb.starting_tlocals)
+                    #self.log("DEBUG: starting stack: %s" % bb.starting_tstack)
+                    #self.log("DEBUG: starting locals: %s" % bb.starting_tlocals)
                 
                 self.log("DEBUG: walking BB %s w/ %s" % (bb, tstack))
                 
@@ -679,7 +679,8 @@ class HIScanner(object):
     # Instructions with specific type-stack implementations
     ###########################################################
     def _swap(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
+        assert (str(tstack[-1]) not in 'JD'), "invalid use of swap"
+        assert (str(tstack[-2]) not in 'JD'), "invalid use of swap"
         t1 = tstack.pop()
         t2 = tstack.pop()
         tstack.push(t1)
@@ -925,11 +926,10 @@ class HIScanner(object):
         tstack.pop_push(self.mktt(self._tt[instr.operands[0]], 1))
     
     def _dup(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
+        assert (str(tstack[-1]) not in 'JD'), "invalid use of dup"
         tstack.append(tstack.top())
     
     def _dup2(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
         tstack += tstack[-2:]
     
     def _jumpspecial(self, instr, tstack, tlocals):
@@ -1041,22 +1041,48 @@ class HIScanner(object):
     _f2l = _i2l
     
     def _dup2_x1(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
         # Stupid category 2 computational types...
-        tstack[-3:] = tstack[-2:] + tstack[-3:]
+        assert (str(tstack[-3]) not in 'JD'), "invalid use of dup2_x1"
+        if str(tstack[-2]) not in 'JD':
+            # form 1
+            tstack[-3:] = tstack[-2:] + tstack[-3:]
+        else:
+            assert str(tstack[-1]) == str(tstack[-2])
+            # form 2
+            tstack[-3:] = [tstack[-2], tstack[-1], tstack[-3], tstack[-2], tstack[-1]]
 
     def _dup2_x2(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
         # Did I mention that category 2 computational types were a stupid idea?
-        tstack[-4:] = tstack[-2:] + tstack[-4:]
+        if str(tstack[-1]) not in 'JD' and str(tstack[-2]) not in 'JD' and str(tstack[-3]) not in 'JD' and str(tstack[-4]) not in 'JD':
+            # form 1
+            tstack[-4:] = tstack[-2:] + tstack[-4:]
+        elif str(tstack[-1]) in 'JD' and str(tstack[-3]) not in 'JD' and str(tstack[-4]) not in 'JD':
+            # form 2
+            assert str(tstack[-1]) == str(tstack[-2])
+            tstack[-4:] = tstack[-2:] + tstack[-4:-2] + tstack[-2:]
+        elif str(tstack[-1]) not in 'JD' and str(tstack[-2]) not in 'JD' and str(tstack[-3]) in 'JD':
+            # form 3
+            assert str(tstack[-3]) == str(tstack[-4])
+            tstack[-4:] = tstack[-2:] + tstack[-4:-2] + tstack[-2:]
+        elif str(tstack[-1]) in 'JD' and str(tstack[-3]) in 'JD':
+            # form 4
+            assert str(tstack[-1]) == str(tstack[-2])
+            assert str(tstack[-3]) == str(tstack[-4])
+            tstack[-4:] = tstack[-2:] + tstack[-4:-2] + tstack[-2:]
     
     def _dup_x1(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
         tstack.insert(-2, tstack[-1])
     
     def _dup_x2(self, instr, tstack, tlocals):
-        # TODO: errr, what with a long or a double in the mix?
-        tstack.insert(-3, tstack[-1])
+        # Is this the last one???
+        assert (str(tstack[-1]) not in 'JD'), "invalid use of dup2_x2"
+        if str(tstack[-2]) not in 'JD':
+            # form 1
+            tstack.insert(-3, tstack[-1])
+        else:
+            # form 2
+            assert str(tstack[-2]) == str(tstack[-3])
+            tstack[-3:] = [tstack[-1:], tstack[-3], tstack[-2], tstack[-1:]]
     
     def _lcmp(self, instr, tstack, tlocals):
         tstack.pop(4)

@@ -29,6 +29,7 @@ Parses a standalone COD for commonly needed information like dependencies.
 
 from optparse import OptionParser
 from time import ctime
+from hashlib import sha1
 import os
 import codlib
 
@@ -55,6 +56,8 @@ if __name__ == '__main__':
         print 'Vendor:       %s' % vendor_name[2:]
     print 'Version:      %s' % cf.data.cod_module_version
     print 'Compile time: %s' % ctime(cf.hdr.timestamp)
+    data = open(path, 'rb').read(cf.trailer._start)
+    print 'Hash:         %s' % sha1(data).digest().encode('hex')
     print 'Siblings:'
     siblings = [str(sibling) for sibling in mod.siblings]
     for i, sibling in enumerate(siblings):

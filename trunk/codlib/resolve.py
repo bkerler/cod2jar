@@ -168,8 +168,11 @@ class Loader(object):
 
     def _init_cache_root(self, cache_root):
         assert self.cache_root is None
-        if (cache_root is not None) and zipfile.is_zipfile(cache_root):
-            self.cache_root = zipfile.ZipFile(cache_root, 'r')
+        if (cache_root is not None):
+            if zipfile.is_zipfile(cache_root):
+                self.cache_root = zipfile.ZipFile(cache_root, 'r')
+            else:
+                self.cache_root = cache_root
         else:
             self.cache_root = cache_root
 
@@ -204,8 +207,9 @@ class Loader(object):
     def _ds_signature(self, sig):
         '''Deserialize a Signature from a depickled blob.'''
         Sig = Signature(None, None)
-        Sig.tag = sig[0]
-        Sig.data = sig[1]
+        Sig.type = sig[0]
+        Sig.tag = sig[1]
+        Sig.data = sig[2]
         return Sig
 
     def _ds_module(self, name):
@@ -828,7 +832,8 @@ class Module(object):
         # loading siblings like this takes some extra time,
         # but allows some symbolic flexibility between versions
         for sibling in self.siblings:
-            self._L.load_module(sibling)
+            m = self._L.load_module(sibling)
+            m.resolve()
 
         # Load our imported modules
         _imports = [(R.get_escaped_lit(n), R.get_escaped_lit(v)) for n, v in ds.modules[1:]]
@@ -865,8 +870,21 @@ class Module(object):
     def actualize(self):
         '''Perform class-actualization on all the classes we contain.'''
         if self._actualized: return self
+        self._actualized = True
         self._L.log("Actualizing %d classes from module '%s'" % (len(self.classes), self.name))
 
+        # Load our siblings (this accounts for slight version differences
+        # where a class moved to a different sibling)
+        # For example,
+        #   net/rim/device/alpha/ui/mediaanimation/CoordinatedAnimation
+        # has moved from net_rim_ui_alpha to net_rim_ui_alpha-1
+        # from 6.0.0.141 to 6.0.0.448
+        # loading siblings like this takes some extra time,
+        # but allows some symbolic flexibility between versions
+        for sibling in self.siblings:
+            m = self._L.load_module(sibling)
+            m.actualize()
+        
         # Start with actualizing the fixups (creating an address-wise map of fixup references
         # and replacing FixupXXX objects in the fixup arrays with the objects they reference...
         def _actualize_fixup_list(f_list, f_map, resolver):
@@ -894,7 +912,6 @@ class Module(object):
         for c in self.classes:
             c.actualize()
 
-        self._actualized = True
         return self
 
     def disasm(self):
@@ -1377,11 +1394,11 @@ class RoutineDef(object):
                         item = unpack('f', pack('i', instruction.operands[0]))[0]
                         op_str = '%E' % item
                         # workaround because jasmin can't handle NaN/Infinity
-                        if '#IND' in op_str or '#QNAN' in op_str:
+                        if 'IND' in op_str or 'NAN' in op_str:
                             # NaN
                             print >>buf, "    ldc 0x7fc00000"
                             print >>buf, "    invokestatic java/lang/Float/intBitsToFloat(I)F"
-                        elif '#INF' in op_str:
+                        elif 'INF' in op_str:
                             if op_str[0] == '-':
                                 # -Infinity
                                 print >>buf, "    ldc -3.4028237E38"
@@ -1398,11 +1415,11 @@ class RoutineDef(object):
                         item = unpack('d', pack('q', instruction.operands[0]))[0]
                         op_str = '%E' % item
                         # workaround because jasmin can't handle NaN/Infinity
-                        if '#IND' in op_str or '#QNAN' in op_str:
+                        if 'IND' in op_str or 'NAN' in op_str:
                             # NaN
                             print >>buf, "    ldc2_w 0x7ff8000000000000"
                             print >>buf, "    invokestatic java/lang/Double/longBitsToDouble(J)D"
-                        elif '#INF' in op_str:
+                        elif 'INF' in op_str:
                             if op_str[0] == '-':
                                 # -Infinity
                                 print >>buf, "    ldc2_w -1.797693134862316E308"
@@ -1611,7 +1628,7 @@ class ClassDef(object):
 
     def get_member_by_name(self, m_name, m_type=None, is_field=False):
         assert (self._resolved), "Class '%s' must be resolved before by-name member lookup will work!" % self
-        # we need to actualize in preparation to get inhertied members?
+        # we need to actualize in preparation to get inherited members?
         #self.actualize()
 
         # Make sure we have a member map
@@ -1640,9 +1657,33 @@ class ClassDef(object):
                 # Look up all members with this name
                 candidates = self.field_members[m_name]
 
-                # Do a field lookup (types ignored)
-                c_fields = [c for c in candidates if isinstance(c, FieldDef)]
-                assert len(c_fields) == 1, "Class '%s' has %d fields named '%s' (Oops...)" % (self, len(c_fields), m_name)
+                # Do a field lookup (types ignored if we do not have it)
+                if m_type:
+                    c_fields = [c for c in candidates if isinstance(c, FieldDef) if c.type == m_type]
+                else:
+                    c_fields = [c for c in candidates if isinstance(c, FieldDef)]
+                # TODO: remove
+                '''
+                if len(c_fields) != 1:
+                    print
+                    print self
+                    print m_name,
+                    print '(%s)' % m_type
+                    print 'Fields:'
+                    for f in self.fields:
+                        print '    %s in %s' % (f.java_def(), f.parent)
+                    print 'Static fields:'
+                    for f in self.static_fields:
+                        print '    %s in %s' % (f.java_def(), f.parent)
+                    print 'Matches:'
+                    for f in c_fields:
+                        print '    %s in %s' % (f.java_def(), f.parent)
+                '''
+                
+                if m_type:
+                    assert len(c_fields) == 1, "Class '%s' has %d fields named '%s' of type '%s' (Oops...)" % (self, len(c_fields), m_name, m_type)
+                else:
+                    assert len(c_fields) == 1, "Class '%s' has %d fields named '%s' (Oops...)" % (self, len(c_fields), m_name)
                 return c_fields[0]
             else:
                 # Look up all members with this name
@@ -1676,16 +1717,23 @@ class ClassDef(object):
                 raise KeyError()
 
         except KeyError as err:
-            
             '''
             # TODO: remove
             if is_field:
+                print >>sys.stderr, ""
                 print >>sys.stderr, "Unresolved field name: (%s, %s, %s)" % (self, m_name, m_type)
+                print >>sys.stderr, "Fields:"
                 members = self.field_members.keys()
                 members.sort()
                 print >>sys.stderr, members
             else:
-                if m_name == 'setPayload' and 'setPayload' in self.method_members:
+                print >>sys.stderr, ""
+                print >>sys.stderr, "Unresolved member name: (%s, %s, %s)" % (self, m_name, m_type)
+                print >>sys.stderr, "Methods:"
+                members = self.method_members.keys()
+                members.sort()
+                print >>sys.stderr, members
+                if m_name in self.method_members:
                     print >>sys.stderr, '**********************************************'
                     candidates = self.method_members[m_name]
                     c_methods = [c for c in candidates if isinstance(c, RoutineDef)]
@@ -1706,11 +1754,7 @@ class ClassDef(object):
                     #print TypeList.from_jts(c.param_types, self.module._L)
                     #print TypeList.from_jts(m_type, self.module._L)
                     print >>sys.stderr, '**********************************************'
-                    raw_input()
-                print >>sys.stderr, "Unresolved member name: (%s, %s, %s)" % (self, m_name, m_type)
-                members = self.method_members.keys()
-                members.sort()
-                print >>sys.stderr, members
+                    #raw_input()
             '''
         
             # Try to see if we inherited this member
@@ -1855,7 +1899,6 @@ class ClassDef(object):
         #print >>buf, '.debug "<debug_source_extension2>"'
 
         # if this class is an inner class or has inner classes
-        '''
         if 'is_inner' in self.attrs:
             # outer classes
             inner_splits = self.to_jts().split('$')
@@ -1878,7 +1921,6 @@ class ClassDef(object):
                     print >>buf, '.inner interface %s inner %s outer %s' % (inner, inner, outer)
                 else:
                     print >>buf, '.inner class %s inner %s outer %s' % (inner, inner, outer)
-        '''
 
         print >>buf, ""
         for field in self.fields:
@@ -2090,11 +2132,12 @@ class ClassRef(object):
         return "<class-ref: [%03d] '%s' (%d:%d) @ 0x%04x>" % (self.mod_index, self, self.extra[0], self.extra[1], self.offset)
 
 class Signature(object):
-    __slots__ = ['tag', 'data']
+    __slots__ = ['type', 'tag', 'data']
 
     def __init__(self, module, raw_ti):
         if (module is None) and (raw_ti is None): return
-        assert (raw_ti.type == 1), "Unknown trailer item type code: %d" % raw_ti.type
+        #assert (raw_ti.type == 1), "Unknown trailer item type code: %d" % raw_ti.type
+        self.type = raw_ti.type
         self.tag = raw_ti.value[:4]
         self.data = raw_ti.value[4:]
 
@@ -2105,4 +2148,4 @@ class Signature(object):
         return "<sig: '%s' (%d bytes)>" % (self, len(self.data))
 
     def serialize(self):
-        return (self.tag, self.data)
+        return (self.type, self.tag, self.data)

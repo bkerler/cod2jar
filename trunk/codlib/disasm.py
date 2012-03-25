@@ -644,11 +644,11 @@ class Instruction(object):
                     elif type in ['float']:
                         op_str = '%E' % item
                         # workaround because jasmin can't handle NaN/Infinity
-                        if '#IND' in op_str or '#QNAN' in op_str:
+                        if 'IND' in op_str or 'NAN' in op_str:
                             # NaN
                             new_instr += "\n    ldc 0x7fc00000"
                             new_instr += "\n    invokestatic java/lang/Float/intBitsToFloat(I)F"
-                        elif '#INF' in op_str:
+                        elif 'INF' in op_str:
                             if op_str[0] == '-':
                                 # -Infinity
                                 new_instr += "\n    ldc -3.4028237E38"
@@ -662,11 +662,11 @@ class Instruction(object):
                     elif type in ['double']:
                         op_str = '%E' % item
                         # workaround because jasmin can't handle NaN/Infinity
-                        if '#IND' in op_str or '#QNAN' in op_str:
+                        if 'IND' in op_str or 'NAN' in op_str:
                             # NaN
                             new_instr += "\n    ldc2_w 0x7ff8000000000000"
                             new_instr += "\n    invokestatic java/lang/Double/longBitsToDouble(J)D"
-                        elif '#INF' in op_str:
+                        elif 'INF' in op_str:
                             if op_str[0] == '-':
                                 # -Infinity
                                 new_instr += "\n    ldc2_w -1.797693134862316E308"
