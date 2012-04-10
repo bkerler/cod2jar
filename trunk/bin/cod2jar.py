@@ -32,7 +32,12 @@ system dependencies or standard libraries).
 import os, sys, traceback, glob, time, zipfile
 from optparse import OptionParser
 from StringIO import StringIO
+import gc
 import codlib
+
+# when dealing with a large number of cod files, we have to periodically flush the loader..
+# in individual mode, when we have loaded this many cod files, flush the loader
+MAX_LOADED_MODULES = 350
 
 class Progress(object):
     def __init__(self, caption, total):
@@ -70,10 +75,12 @@ class Progress(object):
 
 class Cod2Jar(object):
 
+    # in a natural progressive order
     DUMP_FORMATS = [
-        'cache',
-        'text',
         'xml',
+        'debugtext',
+        'text',
+        'cache',
         'jasmin',
         'class',
         'jar',
@@ -112,6 +119,10 @@ class Cod2Jar(object):
         # dump mode
         self.individual_mode = options.individual_mode
         if self._format == 'cache':
+            if options.cache_root is not None:
+                self.log("ERROR: cannot specify a cache root for cache creation; aborting...")
+            # we can use our cache as we are creating it to speed up loader flushes
+            options.cache_root = self._out_path
             self.individual_mode = True
             self.log("WARNING: reverting to individual dump mode for cache creation")
 
@@ -123,7 +134,7 @@ class Cod2Jar(object):
             for c in cods:
                 c_abs = os.path.abspath(c)
                 if not os.path.exists(c_abs):
-                    self.log("WARNING: input file/folder '%s' doesn't exist; ignoring..." % c)
+                    self.log("ERROR: input file/folder '%s' doesn't exist; aborting..." % c)
                 elif os.path.isdir(c_abs):
                     all_cods += glob.glob(os.path.join(c_abs, "*.cod"))
                 else:
@@ -139,9 +150,9 @@ class Cod2Jar(object):
             if not lp:
                 continue    # Skip empty items
             elif not os.path.exists(lp):
-                self.log("WARNING: load path '%s' doesn't exist; ignoring..." % lp)
+                self.log("ERROR: load path '%s' doesn't exist; aborting..." % lp)
             elif not os.path.isdir(lp):
-                self.log("WARNING: load path '%s' isn't a directory; ignoring..." % lp)
+                self.log("ERROR: load path '%s' isn't a directory; aborting..." % lp)
             else:
                 self._load_paths.append(lp)
 
@@ -160,7 +171,7 @@ class Cod2Jar(object):
                     if zipfile.is_zipfile(cache_root):
                         self._read_only = True    # Force read-only mode for zipped caches
                     else:
-                        self.log("WARNING: invalid cache path; '%s' is neither a folder or a Zip; ignoring..." % cache_root)
+                        self.log("ERROR: invalid cache path; '%s' is neither a folder or a Zip; aborting..." % cache_root)
                         cache_root = None
                 #else:
                 #    self._read_only = options.read_only
@@ -175,7 +186,7 @@ class Cod2Jar(object):
 
         name_db = options.name_db
         if (name_db is not None) and (not os.path.exists(name_db)):
-            self.log("WARNING: renaming database '%s' does not exist; ignoring..." % name_db)
+            self.log("ERROR: renaming database '%s' does not exist; aborting..." % name_db)
             name_db = None
         if name_db is not None:
             self._name_db = name_db
@@ -192,9 +203,13 @@ class Cod2Jar(object):
         #self._no_update = options.no_update
         self._hiscan = options.hiscan
         self._parse_only = False
-        if self._format == 'xml':
+        self._disasm_no_resolve = False
+        if self._format in ('xml', 'debugtext'):
             # we do not need to take the time to hiscan or resolve when dumping XML!
             self._parse_only = True
+        if self._format == 'debugtext':
+            # however, we do need to disassemble
+            self._disasm_no_resolve = True
 
     def log(self, msg):
         print >> self._make_log, msg
@@ -207,17 +222,23 @@ class Cod2Jar(object):
         if self._names:
             print "Stripped-member renaming enabled (name DB: '%s')" % self._name_db
 
-    def do_text_dump(self, module):
-        dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
-        with open(dump_file, 'wt') as fd:
-            RD = codlib.ResolvedDumper(fd, self._make_log)
-            RD.dump_module(module, True)
-
     def do_xml_dump(self, module):
         dump_file = os.path.join(self._out_path, module.name + ".cod.xml")
         with open(dump_file, 'wt') as fd:
             XD = codlib.XMLDumper(fd, self._make_log)
             XD.dump_cod(module._cf)
+
+    def do_debugtext_dump(self, module):
+        dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
+        with open(dump_file, 'wt') as fd:
+            UD = codlib.UnresolvedDumper(fd, self._make_log)
+            UD.dump_module(module, True)
+
+    def do_text_dump(self, module):
+        dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
+        with open(dump_file, 'wt') as fd:
+            RD = codlib.ResolvedDumper(fd, self._make_log)
+            RD.dump_module(module, True)
 
     def do_cache_dump(self, module):
         SD = codlib.SerialDumper(self._out_path, self._make_log)
@@ -418,6 +439,15 @@ class Cod2Jar(object):
                         P.update(ticks)
                 print
             """
+        elif self._disasm_no_resolve:
+            P = Progress("Disassembling modules", len(loaded_cods))
+            ticks = 0
+            P.update(ticks)
+            for m in loaded_cods:
+                m.disasm(False)
+                ticks += 1
+                P.update(ticks)
+            print
 
         # Finally, generate our human-readable output (text dump, jasmin source, whatever)
         errors = 0
@@ -457,37 +487,8 @@ class Cod2Jar(object):
         P = Progress("Dumping modules", len(cods_to_dump))
         ticks = 0
         P.update(ticks)
-        retry = False
-        while cods_to_dump and not retry:
-            if retry:
-                retry = False
-            else:
-                cod_name = cods_to_dump.pop(0)
-                self.log("Dumping '%s'" % os.path.basename(cod_name))
-            try:
-                # resolve, actualize, disassemble
-                m = self._loader.load_module(cod_name).resolve().actualize().disasm()
-                # hiscan if we need to
-                if self._hiscan:
-                    H = codlib.HIScanner(self._loader, self._hiscan_log)
-                    for rdef in m.routines:
-                        try:
-                            sub = codlib.Subroutine(rdef)
-                            H.scan(sub)
-                        except KeyboardInterrupt:
-                            raise
-                        except Exception as err:
-                            self.log("ERROR: failed to finish scanning routine '%s'..." % rdef)
-                            traceback.print_exc(file=self._make_log)
-                # dump
-                self._module_dumper(m)
-
-                ticks += 1
-                P.update(ticks)
-            except MemoryError:
-                # urgh, ran out of memory, throw it all away...
-                del self._loader
-                self.log("WARNING: ran out of memory on module '%s', refreshing loader..." % cod_name)
+        while cods_to_dump:
+            if len(self._loader._modules) > MAX_LOADED_MODULES:
                 self._loader = codlib.Loader(
                     self._load_paths,
                     cache_root=self._cache_root,
@@ -495,7 +496,39 @@ class Cod2Jar(object):
                     auto_resolve=True,
                     log_file=self._loader_log
                 )
-                retry = True
+                gc.collect()
+            cod_name = cods_to_dump.pop(0)
+            self.log("Dumping '%s'" % os.path.basename(cod_name))
+            try:
+                m = self._loader.load_module(cod_name)
+                if not self._parse_only:
+                    # resolve, actualize, disassemble
+                    m.resolve().actualize().disasm()
+                    # hiscan if we need to
+                    if self._hiscan:
+                        H = codlib.HIScanner(self._loader, self._hiscan_log)
+                        for rdef in m.routines:
+                            try:
+                                sub = codlib.Subroutine(rdef)
+                                H.scan(sub)
+                            except KeyboardInterrupt:
+                                raise
+                            except Exception as err:
+                                self.log("ERROR: failed to finish scanning routine '%s'..." % rdef)
+                                traceback.print_exc(file=self._make_log)
+                elif self._disasm_no_resolve:
+                    m.disasm(False)
+                # dump
+                self._module_dumper(m)
+
+                ticks += 1
+                P.update(ticks)
+            except MemoryError:
+                # urgh, ran out of memory, bail...
+                self.log("ERROR: ran out of memory on module '%s' with %d cods loaded, aborting..." % (cod_name, len(self._loader._modules)))
+                del self._loader
+                gc.collect()
+                sys.exit(1)
             except KeyboardInterrupt:
                 raise
             except Exception as err:
@@ -513,7 +546,11 @@ class Cod2Jar(object):
         # for jar and cache formats we need to zip up our results
         # after dumping the modules
         if self._format == 'jar':
-            zf = zipfile.ZipFile(self._out_path + '.jar', 'w')
+            try:
+                zf = zipfile.ZipFile(self._out_path + '.jar', 'w', zipfile.ZIP_DEFLATED)
+            except RuntimeError:
+                # could not find zlib
+                zf = zipfile.ZipFile(self._out_path + '.jar', 'w', zipfile.ZIP_STORED)
             for dirpath, dirnames, filenames in os.walk(self._out_path):
                 for filename in filenames:
                     source_file_path = os.path.join(dirpath, filename)
@@ -522,7 +559,11 @@ class Cod2Jar(object):
                         zf.write(source_file_path, relpath)
             zf.close()
         elif self._format == 'cache':
-            zf = zipfile.ZipFile(self._out_path + '.zip', 'w')
+            try:
+                zf = zipfile.ZipFile(self._out_path + '.zip', 'w', zipfile.ZIP_DEFLATED)
+            except RuntimeError:
+                # could not find zlib
+                zf = zipfile.ZipFile(self._out_path + '.zip', 'w', zipfile.ZIP_STORED)
             for dirpath, dirnames, filenames in os.walk(self._out_path):
                 for filename in filenames:
                     source_file_path = os.path.join(dirpath, filename)

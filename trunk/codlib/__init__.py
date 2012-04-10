@@ -32,10 +32,12 @@ from format import CodFile
 from resolve import Module, Loader
 from utils import load_cod_file, load_cod_raw, decode_identifier
 from disasm import _OPCODES
-from dump import ResolvedDumper, XMLDumper, PackageDumper, BinaryDumper, SerialDumper
+from dump import XMLDumper, UnresolvedDumper, ResolvedDumper
+from dump import PackageDumper, BinaryDumper, SerialDumper
 from dump import JasminDumper, ClassDumper
 import instruction_reference
 from analysis import Subroutine, BasicBlock
 from his import HIScanner
+import bytecleaver
 
 __all__ = ['utils', 'format', 'resolve', 'dump']

@@ -53,7 +53,7 @@ if __name__ == '__main__':
     vendor_names = [x.value for x in mod.exports if x.name == '_vendor']
     if vendor_names:
         vendor_name = vendor_names[0]
-        print 'Vendor:       %s' % vendor_name[2:]
+        print 'Vendor:       "%s"' % vendor_name[2:]
     print 'Version:      %s' % cf.data.cod_module_version
     print 'Compile time: %s' % ctime(cf.hdr.timestamp)
     data = open(path, 'rb').read(cf.trailer._start)
