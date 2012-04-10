@@ -33,11 +33,20 @@ from resolve import ClassDef, FieldDef, RoutineDef, LazyClassDef, LazyFieldDef, 
 import traceback, struct
 from itertools import combinations
 
+# the maximum number of slots that can be on the stack before a
+# stack overflow exception is thrown
+GLOBAL_MAX_STACK = 0x200
+
+# the maximum number of rescans of a basic block
+GLOBAL_MAX_RESCAN = 50
+
 class AbortScanning(Exception): pass
 
 class UnknownTotos(AbortScanning): pass
 
 class ScanningStackUnderflow(AbortScanning): pass
+
+class ScanningStackOverflow(AbortScanning): pass
 
 class FieldPatchFailed(AbortScanning): pass
 
@@ -50,10 +59,12 @@ class TStack(list):
         if value.code in (6, 12) and not value._array:
             count *= 2
         self += ([value] * count)
+        if len(self) > GLOBAL_MAX_STACK:
+            raise ScanningStackOverflow("Stack overflow while scanning instructions")
     
     def pop(self, count=None):
         if (count != 0) and (len(self) == 0):
-            raise ScanningStackUnderflow("stack underflow while scanning instructions")
+            raise ScanningStackUnderflow("Stack underflow while scanning instructions")
         
         if count is None:
             return list.pop(self)
@@ -81,7 +92,7 @@ class TStack(list):
         return "{%s}" % ''.join(map(str, self))
 
 class HILogger(object):
-    '''Capture stats and error information for a series of HIScans.'''
+    ''' Capture stats and error information for a series of HIScans. '''
     def __init__(self, logfile=sys.stderr):
         self._logfile = logfile
         self._indent = ''
@@ -108,7 +119,7 @@ class HILogger(object):
     
     def enter_sub(self, sub):
         self.count("subs")
-        self._header = str(sub.routine)
+        self._header = '%s in %s' % (str(sub.routine), str(sub.routine.module))
         self._indent = '\t'
     
     def error_sub(self, sub, err):
@@ -119,7 +130,8 @@ class HILogger(object):
         dump.seek(0)
         dump = dump.read()
         sub_name = str(sub.routine)
-        self.log("ERROR: %s (aborting '%s' scan)" % (err, sub_name))
+        mod_name = str(sub.routine.module)
+        self.log("ERROR: %s (aborting scan of '%s' in %s)" % (err, sub_name, mod_name))
         # uncomment for a traceback
         self.log(dump)
         self._bad_subs.append(sub_name)
@@ -255,7 +267,7 @@ class HIScanner(object):
         return tt
 
     def _merge_ttoken(self, tts, no_fail = False):
-        '''Merges a list of TypeTokens
+        ''' Merges a list of TypeTokens
         '''
         #self.log('Merging types:')
         #for tt in tts:
@@ -410,7 +422,7 @@ class HIScanner(object):
         return plocals
 
     def _calculate_starting_tstack(self, bb):
-        '''Calculates the starting stack of a basic blocks based on parent exit stacks.
+        ''' Calculates the starting stack of a basic blocks based on parent exit stacks.
         '''
         pstacks = self._get_starting_tstacks(bb)
         
@@ -421,10 +433,14 @@ class HIScanner(object):
             tstack = TStack(self._merge_tlists(pstacks, no_fail = True))
         return tstack
 
-    def _calculate_starting_tlocals(self, bb):
-        '''Calculates the starting locals of a basic blocks based on parent exit locals.
+    def _calculate_starting_tlocals(self, bb, routine = None):
+        ''' Calculates the starting locals of a basic blocks based on parent exit locals.
+
+            Optionally provide a RoutineDef to use stack map information if available.
         '''
         plocals = self._get_starting_tlocals(bb)
+        if routine:
+            pass
         
         # Initialize locals, then try to eliminate wildcard types by finding more
         # explicit type info from other parent BBs' locals
@@ -435,7 +451,7 @@ class HIScanner(object):
         return tlocals
 
     def scan(self, sub, count=3, scanning_step_callback=None):
-        '''Compute type-on-top-of-stack values for the RIM-JVM instructions in an analysis.Subroutine.
+        ''' Compute type-on-top-of-stack values for the RIM-JVM instructions in an analysis.Subroutine.
         
             Blows away any previous .totos values for those instructions.
             Returns True if scan was successful, False otherwise.
@@ -449,14 +465,18 @@ class HIScanner(object):
             bb = None
             for b in sub.basic_blocks:
                 #self.log('DEBUG: %s exits: %s' % (str(b), str([(why, str(next)) for why, next in b.exit.iteritems()])))
+                # ending bb type information
                 b.tstack = None
                 b.tlocals = None
+                # starting bb type information
                 b.starting_tstack = None
                 b.starting_tlocals = None
+                # scan count
+                b.scan_count = 0
                 if b.is_initial():
                     bb = b
             if bb is None:
-                raise AbortScanning("no initial BB found in %s" % routine)
+                raise AbortScanning("No initial BB found in %s" % routine)
             
             # Mark the basic blocks we've visited
             visited = set()
@@ -474,6 +494,12 @@ class HIScanner(object):
                 bb = self._get_next_bb(candidates, visited, failed, last_scanned)
                 if not bb:
                     break
+
+                # check to see if we are potentially in an infinite loop
+                bb.scan_count += 1
+                if bb.scan_count > GLOBAL_MAX_RESCAN:
+                    raise AbortScanning("Maximum rescan count exceeded for basic block %s" % bb)
+
                 if bb in failed:
                     failed.remove(bb)
                 
@@ -494,7 +520,7 @@ class HIScanner(object):
                 else:
                     # Otherwise, compute our starting stack/local lists.
                     tstack = self._calculate_starting_tstack(bb)
-                    tlocals = self._calculate_starting_tlocals(bb)
+                    tlocals = self._calculate_starting_tlocals(bb, routine = routine)
                     
                     # track starting type info so if we encounter this block later,
                     # we can compare to see if we have better info
@@ -541,6 +567,10 @@ class HIScanner(object):
                         # Clear the "isreal" flag
                         self._reals = False
 
+                    # TODO: assert the ending stack is the same size as when we previously scanned
+                    # this will catch infinite loops that cause the stack to grow uncontrollably
+                    # maybe just do this if we aren't confused by an exception handler
+                    #assert len(tstack) == len(bb.tstack), "Basic block stack size should not vary between scans"
                     # Set our BB's ending tstack/tlocals
                     bb.tstack = tstack
                     bb.tlocals = tlocals

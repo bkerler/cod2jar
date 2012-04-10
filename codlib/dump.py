@@ -65,6 +65,171 @@ class TextDumper(object):
     def hr(self):
         self.out(self.LINE)
 
+class UnresolvedDumper(TextDumper):
+    '''Dumper for unresolved modules/classes.'''
+    def dump_module(self, M, verbose=False):
+        self.out("Module: %s (v. %s) @ %s" % (M.name, M.version, time.ctime(M.timestamp)))
+        self.hr()
+        if M.attrs:
+            self.out("Attributes:"); self.indent();
+            self.out(', '.join(M.attrs))
+            self.dedent(); self.out()
+
+        if M.exports:
+            self.out("Exported Data:"); self.indent()
+            for ed in M.exports:
+                self.out("%s: %r" % (ed.name, ed.value))
+            self.dedent(); self.out()
+
+        if M.statics:
+            self.out("Static Data:"); self.indent()
+            for (address, value) in M.statics:
+                self.out("0x%04x: %d" % (address, value))
+            self.dedent(); self.out()
+
+        if M.classes:
+            self.out("Class Index:"); self.indent()
+            for i, c in enumerate(M.classes):
+                self.out("%4d. %s" % (i, c.java_def()))
+            self.dedent(); self.out()
+
+            self.out("Classes:"); self.indent()
+            for c in M.classes:
+                self.dump_class(c)
+            self.dedent(); self.out()
+
+        # This stuff is of interest only to devs/debuggers...
+        if verbose:
+            self.out("\n*** VERBOSE MODULE METADATA ***\n")
+            if M.siblings:
+                self.out("Siblings:"); self.indent()
+                self.out(', '.join(M.siblings))
+                self.dedent(); self.out()
+
+            if M.aliases:
+                self.out("Aliases:"); self.indent()
+                self.out(', '.join(M.aliases))
+                self.dedent(); self.out()
+
+            if M.entry_points:
+                self.out("Entry Points:"); self.indent()
+                for i, ep in enumerate(M.entry_points):
+                    self.out("%4d: %s" % (i, ep))
+                self.dedent(); self.out()
+
+            if hasattr(M, 'imports'):
+                self.out("Imported Modules:"); self.indent()
+                for i, imp in enumerate(M.imports):
+                    self.out("%4d: %s (%s)" % (i+1, imp, M.import_versions[M.imports.index(imp)]))
+                self.dedent(); self.out()
+            else:
+                imports = [(M._R.get_escaped_lit(n), M._R.get_escaped_lit(v)) for n,v in M._cf.data.modules[1:]]
+                self.out("Imported Modules:"); self.indent()
+                for i, (imp, ver) in enumerate(imports):
+                    self.out("%4d: %s (%s)" % (i+1, imp, ver))
+                self.dedent(); self.out()
+
+            if M.iface_mrefs:
+                self.out("Interface Method Refs:"); self.indent()
+                for i, imr in enumerate(M.iface_mrefs):
+                    #self.out("%4d: %s %s" % (i, imr.return_type, imr))
+                    self.out("%4d: %s" % (i, imr))
+                self.dedent(); self.out()
+
+            if M.class_refs:
+                self.out("Class Refs:"); self.indent()
+                for i, cr in enumerate(M.class_refs):
+                    self.out("%4d: %s [%s]" % (i, cr, cr.extra))
+                self.dedent(); self.out()
+
+            if M.field_fixups: self._dump_fixups("[Instance] Field Fixups:", M.field_fixups)
+            if M.static_field_fixups: self._dump_fixups("Static Field Fixups:", M.static_field_fixups)
+            if M.method_fixups: self._dump_fixups("Method Fixups:", M.method_fixups)
+            if M.virtual_method_fixups: self._dump_fixups("Virtual Method Fixups:", M.virtual_method_fixups)
+            if M.static_method_fixups: self._dump_fixups("Static Method Fixups:", M.static_method_fixups)
+            if M.class_ref_fixups: self._dump_fixups("Class Ref Fixups:", M.class_ref_fixups)
+            if M.mod_ref_fixups: self._dump_fixups("Module Ref Fixups:", M.mod_ref_fixups)
+
+        self.hr()
+        self.out()
+
+    def _dump_fixups(self, header, fixups):
+        self.out(header); self.indent()
+        for fxp in fixups:
+            self.out(str(fxp))
+            if fxp.offsets:
+                self.indent(); self.out(str(fxp.offsets)); self.dedent()
+        self.dedent(); self.out()
+
+    def dump_class(self, C, **kw):
+        self.out(C.java_def(**kw), ' {'); self.indent()
+
+        if C.vft:
+            self.out(); self.out("// Virtual Funtion Table")
+            for i, vm in enumerate(C.vft):
+                self.out("// %3d: %s" % (i, vm.to_jts()))
+
+        if C.fft:
+            self.out(); self.out("// Field Lookup Table")
+            skip = False
+            for i, f in enumerate(C.fft):
+                if skip:
+                    skip = False
+                    self.out("// %3d: (wide)" % i)
+                else:
+                    if f.type.slots() == 2:
+                        skip = True
+                    self.out("// %3d: %s {%s}" % (i, f.to_jts(), f.type))
+
+
+        if C.fields:
+            self.out(); self.out("// Non-static fields")
+            for f in C.fields:
+                self.dump_field(f, **kw)
+
+        if C.static_fields:
+            self.out(); self.out("// Static fields")
+            for sf in C.static_fields:
+                self.dump_field(sf, **kw)
+
+        if C.nonvirtual_methods:
+            self.out(); self.out("// Non-virtual methods")
+            for m in C.nonvirtual_methods:
+                self.dump_method(m, **kw)
+
+        if C.virtual_methods:
+            self.out(); self.out("// Virtual methods")
+            for m in C.virtual_methods:
+                self.dump_method(m, **kw)
+
+        if C.static_methods:
+            self.out(); self.out("// Static methods")
+            for m in C.static_methods:
+                self.dump_method(m, **kw)
+
+        self.dedent(); self.out('}'); self.out()
+
+    def dump_field(self, F, **kw):
+        self.out(F.java_def(**kw), ';')
+
+    def dump_method(self, M, **kw):
+        self.out(M.java_def(**kw), ' {'); self.indent()
+
+        if M.stack_map:
+            for sme in M.stack_map:
+                self.out("// ", str(sme))
+            self.out("//", '-'*80)
+
+        for i, instr in enumerate(M.instructions):
+            self.out("// %3d. (%05d): %s" % (i, instr.offset, instr))
+
+        if M.handlers:
+            self.out("//", '-'*80)
+            for xh in M.handlers:
+                self.out("// ", str(xh))
+
+        self.dedent(); self.out('}'); self.out()
+
 class ResolvedDumper(TextDumper):
     '''Dumper for resolved modules/classes.'''
     def dump_module(self, M, verbose=False):
@@ -120,16 +285,23 @@ class ResolvedDumper(TextDumper):
                     self.out("%4d: %s" % (i, ep))
                 self.dedent(); self.out()
 
-            if M.imports:
+            if hasattr(M, 'imports'):
                 self.out("Imported Modules:"); self.indent()
                 for i, imp in enumerate(M.imports):
-                    self.out("%4d: %s" % (i+1, imp))
+                    self.out("%4d: %s (%s)" % (i+1, imp, M.import_versions[M.imports.index(imp)]))
+                self.dedent(); self.out()
+            else:
+                imports = [(M._R.get_escaped_lit(n), M._R.get_escaped_lit(v)) for n,v in M._cf.data.modules[1:]]
+                self.out("Imported Modules:"); self.indent()
+                for i, (imp, ver) in enumerate(imports):
+                    self.out("%4d: %s (%s)" % (i+1, imp, ver))
                 self.dedent(); self.out()
 
             if M.iface_mrefs:
                 self.out("Interface Method Refs:"); self.indent()
                 for i, imr in enumerate(M.iface_mrefs):
-                    self.out("%4d: %s %s" % (i, imr.return_type, imr))
+                    #self.out("%4d: %s %s" % (i, imr.return_type, imr))
+                    self.out("%4d: %s" % (i, imr))
                 self.dedent(); self.out()
 
             if M.class_refs:
@@ -282,6 +454,7 @@ class SerialDumper(object):
                 'attrs': M.attrs.keys(),
                 'siblings': M.siblings,
                 'imports': [I.name for I in M.imports],
+                'import_versions': M.import_versions,
                 'aliases': M.aliases,
                 'exports': [X.serialize() for X in M.exports],
                 'entry_points': [EP.serialize() for EP in M.entry_points],

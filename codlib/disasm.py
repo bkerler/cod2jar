@@ -32,6 +32,8 @@ from utils import TypeToken, TypeList, Primitive
 from instruction_reference import branches, conditional_branches, compound_branches
 import sys
 from struct import unpack
+from StringIO import StringIO
+import traceback
 
 # Stand by for Python 2.6+ advanced metaclass juju in 3, 2, 1...
 from abc import ABCMeta
@@ -281,7 +283,7 @@ class Instruction(object):
         # Type-on-Top-of-Stack is always unknown initially
         self.totos = None
     
-    def fixup(self, routine):
+    def fixup(self, routine, auto_resolve = True):
         parent = routine.parent
         mod = routine.module
         assert (mod is parent.module), "Module mismatch ('%s' vs. '%s') for routine '%s'!!!!" % (mod.name, parent.module.name, routine.name)
@@ -290,20 +292,21 @@ class Instruction(object):
         _fixed = [False for i in xrange(len(self._ops))]
         _num_fixed = 0
         
-        # Do we have a potentially-fixup-able field?
-        if self._fixups:
-            _fmap = mod._fixup_map
-            # For each fixup we have...
-            for i, offset in enumerate(self._fixups):
-                if not offset: continue
-                # Search the module's fixup map for the offset
-                try:
-                    self.operands[i] = _fmap[offset]
-                    _fixed[i] = True
-                    _num_fixed += 1
-                except KeyError:
-                    # No cigar
-                    continue
+        if auto_resolve:
+            # Do we have a potentially-fixup-able field?
+            if self._fixups:
+                _fmap = mod._fixup_map
+                # For each fixup we have...
+                for i, offset in enumerate(self._fixups):
+                    if not offset: continue
+                    # Search the module's fixup map for the offset
+                    try:
+                        self.operands[i] = _fmap[offset]
+                        _fixed[i] = True
+                        _num_fixed += 1
+                    except KeyError:
+                        # No cigar
+                        continue
         
         # If we "fixed" all raw operands, bail now
         if _num_fixed == len(self._ops): return self
@@ -318,7 +321,8 @@ class Instruction(object):
                     self.operands[0] = mod.static_field_fixups[self._ops[1]].get_item()
                 else:
                     # Address lookup
-                    self.operands[0] = R.get_class(self._ops[0]).get_class().get_field_by_address(self._ops[1])
+                    if auto_resolve:
+                        self.operands[0] = R.get_class(self._ops[0]).get_class().get_field_by_address(self._ops[1])
             except Exception as e:
                 mod._L.log("WARNING: failed to fixup class-fieldref (%r): %s (%s)" % (self, e, type(e)))
                 self.operands[0] = BadOperand(e)
@@ -342,32 +346,38 @@ class Instruction(object):
                 else:
                     mod_byte, routine_word = self._ops[0]
 
-                if mod_byte == 255:
-                    # Indexed fixup-lookup
-                    self.operands[0] = mod.method_fixups[routine_word].get_item()
-                    #mod._L.log("DEBUG: call-lookup; method_fixup[%d] := %s" % (routine_word, self.operands[0]))
-                elif mod_byte == 0:
+                if mod_byte == 0:
                     # Address routine lookup within our own module (already resolved, for sure)
                     self.operands[0] = mod._routine_map[routine_word]
                     #mod._L.log("DEBUG: call-lookup; method_offset[%d] := %s" % (routine_word, self.operands[0]))
-                elif mod_byte <= len(mod.imports):
-                    # Address routine lookup within an import module
-                    try:
-                        imod = mod.imports[mod_byte - 1]
-                    except IndexError as err:
-                        raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
-                    self.operands[0] = imod._routine_map[routine_word]
-                    #mod._L.log("DEBUG: call-lookup; module[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
-                elif not mod._disk:
-                    # Try module-remapping (only in heap-mode)
-                    try:
-                        imod = mod._mod_remap[mod_byte] # NOT (mod_byte - 1)!!!  Trust me!
-                    except KeyError as err:
-                        raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
-                    self.operands[0] = imod._routine_map[routine_word]
-                    #mod._L.log("DEBUG: call-lookup; module_remap[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
+                elif auto_resolve:
+                    if mod_byte == 255:
+                        # Indexed fixup-lookup
+                        self.operands[0] = mod.method_fixups[routine_word].get_item()
+                        #mod._L.log("DEBUG: call-lookup; method_fixup[%d] := %s" % (routine_word, self.operands[0]))
+                    elif mod_byte <= len(mod.imports):
+                        # Address routine lookup within an import module
+                        try:
+                            imod = mod.imports[mod_byte - 1]
+                        except IndexError as err:
+                            raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
+                        self.operands[0] = imod._routine_map[routine_word]
+                        #mod._L.log("DEBUG: call-lookup; module[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
+                    elif not mod._disk:
+                        # Try module-remapping (only in heap-mode)
+                        try:
+                            imod = mod._mod_remap[mod_byte] # NOT (mod_byte - 1)!!!  Trust me!
+                        except KeyError as err:
+                            raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
+                        self.operands[0] = imod._routine_map[routine_word]
+                        #mod._L.log("DEBUG: call-lookup; module_remap[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
             except Exception as e:
                 mod._L.log("WARNING: %s" % e)
+                dump = StringIO()
+                traceback.print_exc(file=dump)
+                dump.seek(0)
+                dump = dump.read()
+                mod._L.log(dump)
                 self.operands[0] = BadOperand(e)
             
             # If we KNOW this is getting invoked like a static method, make sure that operands[0] is
@@ -393,15 +403,18 @@ class Instruction(object):
             else:
                 self.operands[0] = self._ops[0] # No go; have to fix it at "runtime" using heuristic instruction scanning
         elif ((_op in _CLASSREF_OP) or (_op in _CLASSREF_CHECK_OP) or (_op in _CHECKCASTBRANCH_OP)) and (not _fixed[0]):
-            self.operands[0] = R.get_class(self._ops[0])
+            if auto_resolve:
+                self.operands[0] = R.get_class(self._ops[0])
         elif _op in _INVOKEINTERFACE_OP:
             try:
-                self.operands[0] = mod._iface_mref_map[self._ops[0]].get_method()
+                if auto_resolve:
+                    self.operands[0] = mod._iface_mref_map[self._ops[0]].get_method()
             except KeyError as e:
                 mod._L.log("WARNING: bad_ifacemethod_fixup[%s]" % self._ops[0])
                 self.operands[0] = BadOperand(e)
         elif _op in _MULTINEWARRAY_OBJ_OP and (not _fixed[0]):
-            self.operands[0] = R.get_class(self._ops[0])    
+            if auto_resolve:
+                self.operands[0] = R.get_class(self._ops[0])    
         
         # Eliminate things we don't need...
         del self._ops,  self._fixups

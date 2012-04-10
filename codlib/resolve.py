@@ -37,11 +37,6 @@ from struct import pack, unpack
 import zipfile
 from StringIO import StringIO
 
-# We use these a lot
-from utils import UnresolvedClass, BadClassRef, UnresolvedLocalField, UnresolvedStaticField, BadType
-from utils import TypeToken, TypeList, Primitive
-from disasm import _OPCODES, Instruction, BadOperand
-
 # Constants
 #----------------------------------------------------------
 
@@ -150,6 +145,14 @@ class Loader(object):
     '''Context object used to manage the loading/resolving of COD modules (from COD or cache).'''
 
     def __init__(self, search_path=[], cache_root=None, name_db_path=None, auto_resolve=True, log_file=sys.stderr):
+        if not isinstance(search_path, list):
+            # in case we get '/home/user/blah'
+            search_path = [search_path,]
+        else:
+            # in case we get ['',]
+            search_path = [x for x in search_path if x]
+        if '.' not in search_path:
+            search_path = search_path + ['.',]
         self.search_path = search_path
         self.auto_resolve = auto_resolve
         self._log = log_file
@@ -165,7 +168,39 @@ class Loader(object):
         self.field_name_db = {}
         if name_db_path:
             self.open_name_db(name_db_path)
+        # a map of module names/aliases to their file system path, loaded or not
+        self._module_path_map = {}
+        self._init_module_path_map()
+        # a map of module names/aliases to their cache location, loaded or not
+        self._module_cache_map = {}
+        self._init_module_cache_map()
 
+    def _init_module_path_map(self):
+        for search_path in self.search_path[::-1]:
+            for filename in os.listdir(search_path):
+                cod_path = os.path.join(search_path, filename)
+                if cod_path.endswith('.cod') and os.path.isfile(cod_path):
+                    for name in utils.quick_get_module_names(cod_path):
+                        self._module_path_map[name] = cod_path
+                    # also give it the file name just in case it is different
+                    self._module_path_map[filename[:-4]] = cod_path
+                    
+
+    def _init_module_cache_map(self):
+        if self.cache_root is not None:
+            if isinstance(self.cache_root, zipfile.ZipFile):
+                cached_cod_names = self.cache_root.namelist()
+                cached_cod_names = [x[:-7] for x in cached_cod_names if '/' not in x and x.endswith('.cod.db')]
+            else:
+                cached_cod_names = os.listdir(self.cache_root)
+                cached_cod_names = [x for x in cached_cod_names if os.path.isfile(os.path.join(self.cache_root, x))]
+                cached_cod_names = [x[:-7] for x in cached_cod_names if x.endswith('.cod.db')]
+            for cached_cod_name in cached_cod_names:
+                M = self._unpickle(cached_cod_name + '.cod.db')
+                names = [M['name'],] + M['aliases']
+                for name in names:
+                    self._module_cache_map[name] = cached_cod_name
+        
     def _init_cache_root(self, cache_root):
         assert self.cache_root is None
         if (cache_root is not None):
@@ -241,6 +276,7 @@ class Loader(object):
 
         # Create an array of lazy references to its imported modules
         mod.imports = map(self.ref_module, M['imports'])
+        mod.import_versions = M['import_versions']
 
         # Create lazy references to its classes
         mod.classes = map(self.ref_class, M['classes'])
@@ -270,8 +306,18 @@ class Loader(object):
 
     def load_codfile(self, filename):
         '''Load a module from an explicitly-named COD file.'''
-        cf = utils.load_cod_file(filename)
+        filename = os.path.split(filename)[1]
+        if filename.endswith('.cod'):
+            filename = filename[:-4]
+        
+        # replace it with the actual name if it is an aliased name
+        if filename in self._module_path_map:
+                filename = self._module_path_map[filename]
+        if self.cache_root is not None:
+            if filename in self._module_cache_map:
+                filename = self._module_cache_map[filename]
 
+        cf = utils.load_cod_file(filename)
         mod = Module(self, cf)
 
         if self.auto_resolve:
@@ -279,11 +325,29 @@ class Loader(object):
 
         # Inject ourselves into the module cache
         self._modules[mod.name] = mod
+        for alias in mod.aliases:
+            self._modules[alias] = mod
 
         return mod
 
-    def load_module(self, name):
+    def __contains__(self, item):
+        '''Check the load path/cache for a module name, currently loaded or not.'''
+        if isinstance(item, basestring):
+            cod_name = os.path.split(item)[1]
+            if not cod_name.endswith('.cod'):
+                cod_name += cod_name[:-4]
 
+            if cod_name in self._module_path_map:
+                return True
+            if self.cache_root is not None:
+                if cod_name in self._module_cache_map:
+                    return True
+        else:
+            raise LoadError("Unknown type for __contains__ in loader: %s (%s)" % (str(item), str(type(item))))
+        return False
+        
+    def load_module(self, name):
+        '''Load a module from the search path'''
         # This line is convenient and fast (because it ignores the full path and just
         # tries to load a similarly-named module from cache), but it doesn't give full control...
         name = os.path.splitext(os.path.basename(name))[0]
@@ -294,35 +358,46 @@ class Loader(object):
         except KeyError:
             # Not in memory cache; must load from somewhere
             mod = None
-
-            # Use disk cache (if we have a cache_root)
+            
+            # Use disk cache (we must have a cache_root)
             if self.cache_root is not None:
-                self.log("Loading module '%s' from disk cache" % name)
-                mod = self._ds_module(name) # This method also sticks the module into our memory cache
+                if name in self._module_cache_map:
+                    if self._module_cache_map[name] != name:
+                        self.log("Loading module '%s' as '%s' from disk cache" % (self._module_cache_map[name], name))
+                    else:
+                        self.log("Loading module '%s' from disk cache" % name)
+                    mod = self._ds_module(self._module_cache_map[name]) # This method also sticks the module into our memory cache
 
             # Failing that (if mod is still None), try loading from the original COD file
             if mod is None:
-                self.log("Loading module '%s' from COD" % name)
-                cf = utils.load_cod_file(name, self.search_path)
-                mod = Module(self, cf)
+                if name in self._module_path_map:
+                    if self._module_path_map[name] != name:
+                        self.log("Loading module '%s' as '%s' from COD" % (self._module_path_map[name], name))
+                    else:
+                        self.log("Loading module '%s' from COD" % name)
+                    cf = utils.load_cod_file(self._module_path_map[name], self.search_path)
+                    mod = Module(self, cf)
 
-                # Stick this module in memory cache
-                self._modules[name] = mod
-                for alias in mod.aliases:
-                    self._modules[alias] = mod
-                
-                # Resolve the module's external references AFTER it has been added to the loader's registry...
-                if self.auto_resolve:
-                    mod.resolve()
+                    # Stick this module in memory cache
+                    self._modules[mod.name] = mod
+                    for alias in mod.aliases:
+                        self._modules[alias] = mod
+                    
+                    # Resolve the module's external references AFTER it has been added to the loader's registry...
+                    if self.auto_resolve:
+                        mod.resolve()
+                        
+            if mod is None:
+                raise(LoadError("Could not load module %s from cache or search path" % name))
             return mod
 
     def _ds_type_token(self, type_token):
         '''Deserialize a TypeToken from a depickled Java Type String.'''
-        return TypeToken.from_jts(type_token, self)
+        return utils.TypeToken.from_jts(type_token, self)
 
     def _ds_type_list(self, type_list):
         '''Deserialize a TypeList from a depickled Java Type String.'''
-        return TypeList.from_jts(type_list, self)
+        return utils.TypeList.from_jts(type_list, self)
 
     def _ds_field(self, parent, field_data):
         '''Deserialize a FieldDef from a depickled blob.'''
@@ -357,14 +432,14 @@ class Loader(object):
 
     def _ds_instruction(self, in_data):
         '''Deserialize an Instruction from a depickled blob.'''
-        inst = Instruction(None, None, None, None)
+        inst = disasm.Instruction(None, None, None, None)
 
         if len(in_data) == 4:
             inst.offset, inst.opcode, ops, inst.totos = in_data
         else:
             inst.offset, inst.opcode, ops, inst.totos = in_data[0], in_data[1], [], in_data[2]
 
-        inst._name = _OPCODES[inst.opcode]
+        inst._name = disasm._OPCODES[inst.opcode]
         inst.totos = self._ds_type_token(inst.totos) if (inst.totos is not None) else None
 
         inst.operands = []
@@ -373,7 +448,7 @@ class Loader(object):
             if otype == 'L':
                 inst.operands.append(oval)
             elif otype == 'T':
-                inst.operands.append(TypeToken.from_jts(oval, self))
+                inst.operands.append(utils.TypeToken.from_jts(oval, self))
             else:
                 inst.operands.append(self._ds_jts_ref(otype, oval))
 
@@ -392,6 +467,7 @@ class Loader(object):
         # Simple stuff
         rd.name = method_data['name']
         rd.parent = parent
+        rd.module = parent.module
         rd.max_stack, rd.max_locals, rd.stack_size = method_data['limits']
         rd.offset = rd.code_offset = method_data['code_offset']
         rd.attrs = dict((a, a) for a in method_data['attrs'])
@@ -522,11 +598,13 @@ class Loader(object):
 
     def add_new_search_path(self, new_path):
         self.search_path.append(new_path)
+        self._init_module_path_map()
 
     def set_cache_root(self, cache_root):
         '''Initialization of a cache root after the loader has been created.'''
         assert self.cache_root == None
         self._init_cache_root(cache_root)
+        self._init_module_path_map()
 
     def open_name_db(self, db_path):
         # if we already have one open, save and close it
@@ -660,15 +738,15 @@ class Resolver(object):
             return self._cache['tlists'][offset]
         except KeyError:
             if offset == 0xFFFF:
-                # Not sure what to do here--a null type that has to be patched-up?
-                # (Treating this as a wildcard type for now)
-                x = utils.TypeList.from_jts("*", self._M._L)
+                # this is an empty type list
+                x = utils.TypeList.from_jts("", self._M._L)
             else:
                 x = utils.TypeList(self._db.seek(offset))
             self._cache['tlists'][offset] = x
             return x
 
     def get_class(self, class_):
+        # this little disaster is how classes are born
         M = self._M
         if isinstance(class_, basestring):
             # Special case--if we need to resolve a type by name, try to use our module's loader
@@ -676,10 +754,10 @@ class Resolver(object):
                 return M._L.load_class(class_)
             except LoadError as err:
                 # Hacky error return (since all our Unresolved/Bad class ref types expect a class-ref tuple)
-                urc = UnresolvedClass((-1, -1))
+                urc = utils.UnresolvedClass((-1, -1))
                 urc.name = class_
                 return urc
-        elif isinstance(class_, UnresolvedClass):
+        elif isinstance(class_, utils.UnresolvedClass):
             mod_byte, class_byte = class_.class_id
         else:
             mod_byte, class_byte = class_
@@ -696,8 +774,9 @@ class Resolver(object):
                 # So it wasn't there...
                 pass
 
-        # Unless the mod byte is 0 or 255...
-        if mod_byte not in (0, 255):
+        # Unless the mod byte is 0 (local) or 255 (???) or a sibling
+        if mod_byte not in (0, 255) and \
+           M.imports[mod_byte - 1].name not in M.siblings:
             # Otherwise, start with a Class-Ref list lookup
             # class_byte maxes out at 255, while index may be > 255
             # Ergo, we must check all indices such that (index & 0xff) == class_byte
@@ -719,26 +798,26 @@ class Resolver(object):
                     return M.classes[class_byte]
                 except IndexError:
                     self.log("Local-module class index [%d] out of range. (Mod:Class reference %d:%d)" % (class_byte, mod_byte, class_byte))
-                    return BadClassRef((0, class_byte))
+                    return utils.BadClassRef((0, class_byte))
             else:
                 try:
                     ext_mod = M.imports[mod_byte - 1]
                 except IndexError:
                     self.log("Foreign-module index [%d] out of range. (Mod:Class reference %d:%d)" % (mod_byte, mod_byte, class_byte))
-                    return BadClassRef((mod_byte, class_byte))
+                    return utils.BadClassRef((mod_byte, class_byte))
                 try:
                     return ext_mod.classes[class_byte]
                 except IndexError:
                     self.log("Foreign-module class index [%d] out of range. (Mod:Class reference %d:%d)" % (class_byte, mod_byte, class_byte))
-                    return BadClassRef((mod_byte, class_byte))
-        else:
-            if class_byte == 255:
-                # No-such-class (e.g., the superclass of "java.lang.Object")
-                return None
+                    return utils.BadClassRef((mod_byte, class_byte))
+
+        if mod_byte == 255 and class_byte == 255:
+            # No-such-class (e.g., the superclass of "java.lang.Object")
+            return None
 
         # Out. Of. Luck.
         self.log("ERROR: Unresolvable class identifier: (%d:%d)" % (mod_byte, class_byte))
-        return UnresolvedClass((mod_byte, class_byte))
+        return utils.UnresolvedClass((mod_byte, class_byte))
 
 
 # Main COD abstract types
@@ -914,15 +993,16 @@ class Module(object):
 
         return self
 
-    def disasm(self):
+    def disasm(self, auto_resolve = True):
         '''Trigger disassembly/fixup of all routines defined in this module.'''
         if self._disasmed: return self
         self._L.log("Disassembling %d routines from module '%s'" % (len(self.routines), self.name))
 
         for r in self.routines:
-            r.disasm()
+            r.disasm(auto_resolve = auto_resolve)
 
-        del self._fixup_map, self._iface_mref_map
+        if auto_resolve:
+            del self._fixup_map, self._iface_mref_map
         self._disasmed = True
         return self
 
@@ -1019,8 +1099,8 @@ class FixupField(Fixup):
         R = module._R
         mref, self.offsets = raw_fxp
         if isinstance(mref, format.FxpLocalMemberRef):
-            self.class_ = UnresolvedClass((0, mref.class_index))
-            self.name = UnresolvedLocalField(mref.field_index)
+            self.class_ = utils.UnresolvedClass((0, mref.class_index))
+            self.name = utils.UnresolvedLocalField(mref.field_index)
             self.type = None
         else:
             self.class_ = module._class_ref_map[mref.class_ref]
@@ -1029,7 +1109,7 @@ class FixupField(Fixup):
         self.item = None
 
     def resolve(self, resolver):
-        if isinstance(self.class_, UnresolvedClass):
+        if isinstance(self.class_, utils.UnresolvedClass):
             _cc = self.class_
             self.class_ = resolver(self.class_)
             try:
@@ -1191,15 +1271,16 @@ class RoutineDef(object):
 
         return self
 
-    def disasm(self):
+    def disasm(self, auto_resolve = True):
         if self._disasmed: return self
         self._disasmed = True
 
         # Disassemble/fixup all instructions
-        self.instructions = [instr.fixup(self) for instr in disasm.disassembly(self)]
+        self.instructions = [instr.fixup(self, auto_resolve=auto_resolve) for instr in disasm.disassembly(self)]
 
         # Parse/fixup exception handlers
-        self.handlers = [ExHandler(self.module, self, xh).fixup(self) for xh in self._raw_handlers]
+        if auto_resolve:
+            self.handlers = [ExHandler(self.module, self, xh).fixup(self) for xh in self._raw_handlers]
         del self._raw_handlers  # No longer needed
 
         return self
@@ -1511,7 +1592,7 @@ class ExHandler(object):
         self.target = raw_xh.target
         self._type_id = raw_xh.type
         self._type_offset = raw_xh.type_offset
-        self.type = UnresolvedClass(self._type_id)
+        self.type = utils.UnresolvedClass(self._type_id)
 
     def fixup(self, routine):
         mod = routine.parent.module
@@ -1560,9 +1641,9 @@ class ClassDef(object):
         short_name = R.get_id(raw_cd.class_name)
         self.name = '%s/%s' % (self.package, short_name) if self.package else short_name
         self._superclass_id = raw_cd.superclass
-        self.superclass = UnresolvedClass(self._superclass_id)
+        self.superclass = utils.UnresolvedClass(self._superclass_id)
         self._iface_ids = raw_cd.ifaces
-        self.ifaces = [UnresolvedClass(cid) for cid in self._iface_ids]
+        self.ifaces = [utils.UnresolvedClass(cid) for cid in self._iface_ids]
         self.attrs = utils.parse_flags(raw_cd.flags, self.ATTRS)
 
         # Handle fields (and their attributes, which are stored separate on disk)
@@ -1624,12 +1705,12 @@ class ClassDef(object):
         try:
             return self._static_address_map[address]
         except KeyError:
-            return UnresolvedStaticField(address)
+            return utils.UnresolvedStaticField(address)
 
     def get_member_by_name(self, m_name, m_type=None, is_field=False):
         assert (self._resolved), "Class '%s' must be resolved before by-name member lookup will work!" % self
-        # we need to actualize in preparation to get inherited members?
-        #self.actualize()
+        # we need to actualize in preparation to get inherited members
+        self.actualize()
 
         # Make sure we have a member map
         if self.field_members is None:
@@ -1660,25 +1741,29 @@ class ClassDef(object):
                 # Do a field lookup (types ignored if we do not have it)
                 if m_type:
                     c_fields = [c for c in candidates if isinstance(c, FieldDef) if c.type == m_type]
+                    if len(c_fields) != 1:
+                        # we need to be more OOPish
+                        c_fields = [c for c in candidates if isinstance(c, FieldDef) if m_type.is_super_or_implements_or_equivalent(c.type)]
                 else:
                     c_fields = [c for c in candidates if isinstance(c, FieldDef)]
                 # TODO: remove
-                '''
+                ''''''
                 if len(c_fields) != 1:
-                    print
-                    print self
-                    print m_name,
-                    print '(%s)' % m_type
-                    print 'Fields:'
-                    for f in self.fields:
-                        print '    %s in %s' % (f.java_def(), f.parent)
-                    print 'Static fields:'
-                    for f in self.static_fields:
-                        print '    %s in %s' % (f.java_def(), f.parent)
-                    print 'Matches:'
-                    for f in c_fields:
-                        print '    %s in %s' % (f.java_def(), f.parent)
-                '''
+                    if m_name == '_screen':
+                        print
+                        print self
+                        print m_name,
+                        print '(%s)' % m_type
+                        print 'Fields:'
+                        for f in self.fields:
+                            print '    %s in %s' % (f.java_def(), f.parent)
+                        print 'Static fields:'
+                        for f in self.static_fields:
+                            print '    %s in %s' % (f.java_def(), f.parent)
+                        print 'Matches:'
+                        for f in c_fields:
+                            print '    %s in %s' % (f.java_def(), f.parent)
+                ''''''
                 
                 if m_type:
                     assert len(c_fields) == 1, "Class '%s' has %d fields named '%s' of type '%s' (Oops...)" % (self, len(c_fields), m_name, m_type)
@@ -1707,9 +1792,9 @@ class ClassDef(object):
                         # ooooh, this is a bad bad thing
                         # return this if no better candidate is found
                         try:
-                            super_c = self.superclass.get_member_by_name(m_name, m_type, is_field)
-                            if m_type.is_super_or_implements_or_equivalent(super_c.param_types):
-                                return super_c
+                            inherited_c = self.superclass.get_member_by_name(m_name, m_type, is_field)
+                            if m_type.is_super_or_implements_or_equivalent(inherited_c.param_types):
+                                return inherited_c
                         except ValueError:
                             pass
                         self.module._L.log("WARNING: Could not find match for %s(%s)... Selecting %s" % (m_name, m_type, c))
@@ -1728,7 +1813,7 @@ class ClassDef(object):
                 print >>sys.stderr, members
             else:
                 print >>sys.stderr, ""
-                print >>sys.stderr, "Unresolved member name: (%s, %s, %s)" % (self, m_name, m_type)
+                print >>sys.stderr, "Unresolved method name: (%s, %s, %s)" % (self, m_name, m_type)
                 print >>sys.stderr, "Methods:"
                 members = self.method_members.keys()
                 members.sort()
@@ -1751,8 +1836,8 @@ class ClassDef(object):
                     print '    Iface:',
                     print [x.type.ifaces for x in m_type][1]
                     print m_type.is_super_or_implements_or_equivalent(c.param_types)
-                    #print TypeList.from_jts(c.param_types, self.module._L)
-                    #print TypeList.from_jts(m_type, self.module._L)
+                    #print utils.TypeList.from_jts(c.param_types, self.module._L)
+                    #print utils.TypeList.from_jts(m_type, self.module._L)
                     print >>sys.stderr, '**********************************************'
                     #raw_input()
             '''
@@ -1761,6 +1846,13 @@ class ClassDef(object):
             if self.superclass:
                 try:
                     return self.superclass.get_member_by_name(m_name, m_type, is_field)
+                except ValueError:
+                    # we want this error to happen on the original class
+                    pass
+            # interfaces inherit from other interfaces
+            for iface in self.ifaces:
+                try:
+                    return iface.get_member_by_name(m_name, m_type, is_field)
                 except ValueError:
                     # we want this error to happen on the original class
                     pass
@@ -1839,13 +1931,13 @@ class ClassDef(object):
         self._actualized = True
         return self
 
-    def disasm(self):
+    def disasm(self, auto_resolve = True):
         '''Convert our routines' bytecode into disassembled (symbolic) pseudo-assembly code.
 
             All loaded classes/routines must be resolved+actualized prior to disassembly.
         '''
         for r in itertools.chain(self.virtual_methods, self.nonvirtual_methods, self.static_methods):
-            r.disasm()
+            r.disasm(auto_resolve = auto_resolve)
 
     def get_class(self):
         return self
@@ -2080,7 +2172,7 @@ class InterfaceMethodRef(object):
         R = module._R
         self.offset = raw_imr._start
         self._class_id = raw_imr.class_id
-        self.class_ = UnresolvedClass(self._class_id)
+        self.class_ = utils.UnresolvedClass(self._class_id)
         self.name = R.get_id(raw_imr.name)
         self.param_types = R.get_tlist(raw_imr.param_types)
         self.return_type = R.get_tlist(raw_imr.return_type)

@@ -27,7 +27,50 @@
 utils: Constants and utility functions for CODng.
 """
 
+from struct import unpack
 from bytecleaver import *
+
+# Quick, limited parsers
+#----------------------------------------------------------
+def quick_get_module_names(cod_path):
+    '''Quickly parse out the module name and aliases from a COD.'''
+    def _get_lit(f, offset):
+        f.seek(offset)
+        data = ''
+        c = f.read(1)
+        while c != '\x00' and c != '':
+            data += c
+            c = f.read(1)
+        return data
+    
+    f = open(cod_path, 'rb')
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 4)
+    num_mods = unpack('B', f.read(1))[0]
+    num_classes = unpack('B', f.read(1))[0]
+    f.seek(ds_offset + 6)
+    exports_offset = unpack('H', f.read(2))[0]
+    f.seek(ds_offset + 28)
+    aliases_offset = unpack('H', f.read(2))[0]
+    # data section offset + data header size + class offsets size
+    f.seek(ds_offset + 52 + 2*num_classes)
+    mod_offset = unpack('H', f.read(2))[0]
+    # data section offset + aliases offset
+    f.seek(ds_offset + aliases_offset)
+    num_aliases = (exports_offset - aliases_offset) / 2
+    aliases_offsets = []
+    for i in range(num_aliases):
+        aliases_offsets.append(unpack('H', f.read(2))[0])
+    
+    # finally, retrieve the names
+    names = [_get_lit(f, ds_offset + mod_offset)]
+    for each in aliases_offsets:
+        names.append(_get_lit(f, ds_offset + each))
+    return names
 
 # Utility loading code
 #----------------------------------------------------------
@@ -371,6 +414,18 @@ class TypeToken(object):
         return "<tt: '%s'>" % str(self)
 
     def __cmp__(self, other):
+        # gt implies more defined (ie bool > int)
+        TYPE_CMP = {
+            ('I', 'S'): -1,
+            ('I', 'C'): -1,
+            ('I', 'B'): -1,
+            ('I', 'Z'): -1,
+            ('S', 'I'): 1,
+            ('C', 'I'): 1,
+            ('B', 'I'): 1,
+            ('Z', 'I'): 1,
+        }
+
         sself = str(self)
         sother = str(other)
 
@@ -381,29 +436,32 @@ class TypeToken(object):
         if sself != '*' and sother == '*':
             return 1
 
-        if self._object and other._object:
-            # gt => more defined (ie String > Object)
-            # TODO: prioritize non-exceptions over exceptions?
-            return self.type.__cmp__(other.type)
-        else:
-            # gt => more defined (ie bool > int)
-            TYPE_CMP = {
-                ('I', 'S'): -1,
-                ('I', 'C'): -1,
-                ('I', 'B'): -1,
-                ('I', 'Z'): -1,
-                ('S', 'I'): 1,
-                ('C', 'I'): 1,
-                ('B', 'I'): 1,
-                ('Z', 'I'): 1,
-            }
-            self_base = self.type.to_jts()
-            other_base = self.type.to_jts()
-            if self._array and other._array:
-                if self.dims == other.dims:
-                    if (self_base, other_base) in TYPE_CMP:
-                        return TYPE_CMP(self_base, other_base)
+        if self._array and other._array:
+            # they both are arrays
+            if self.dims == other.dims:
+                if self._object and other._object:
+                    # gt implies more defined (ie String > Object)
+                    # TODO: prioritize non-exceptions over exceptions?
+                    return self.type.__cmp__(other.type)
+                else:
+                    self_base = self.type.to_jts()
+                    other_base = self.type.to_jts()
+                    if self._array and other._array:
+                        if self.dims == other.dims:
+                            if (self_base, other_base) in TYPE_CMP:
+                                return TYPE_CMP(self_base, other_base)
+                    elif not self._array and not other._array:
+                        if (self_base, other_base) in TYPE_CMP:
+                            return TYPE_CMP(self_base, other_base)
+        elif not self._array and not other._array:
+            # they both aren't arrays
+            if self._object and other._object:
+                # gt implies more defined (ie String > Object)
+                # TODO: prioritize non-exceptions over exceptions?
+                return self.type.__cmp__(other.type)
             else:
+                self_base = self.type.to_jts()
+                other_base = self.type.to_jts()
                 if (self_base, other_base) in TYPE_CMP:
                     return TYPE_CMP(self_base, other_base)
         # otherwise these types are apples and oranges...
@@ -412,7 +470,7 @@ class TypeToken(object):
     def __eq__(self, other):
         return str(self) == str(other)    # Hacky/inefficient, but it works in all the corner cases...
 
-    def __neq__(self, other):
+    def __ne__(self, other):
         return str(self) != str(other)    # Hacky/inefficient, but it works in all the corner cases...
 
     def resolve(self, resolver):
