@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 
 # Copyright (c) 2012, derrotehund361@googlemail.com
 # All rights reserved.

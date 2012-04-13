@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 
 # Copyright (c) 2012, derrotehund361@googlemail.com
 # All rights reserved.
@@ -44,13 +44,11 @@ if __name__ == '__main__':
         path = args[0]
 
     _SEARCH_PATH = [os.path.split(path)[0],]
-    filename = os.path.split(path)[1]
     cf = codlib.load_cod_file(path)
-    L = codlib.Loader(_SEARCH_PATH, auto_resolve=False)
-    mod = L.load_module(filename)
 
     print 'Name:         %s' % cf.data.cod_module_name
-    vendor_names = [x.value for x in mod.exports if x.name == '_vendor']
+    exports = codlib.utils.quick_get_exports(path)
+    vendor_names = [value for name, value in exports if name == '_vendor']
     if vendor_names:
         vendor_name = vendor_names[0]
         print 'Vendor:       "%s"' % vendor_name[2:]
@@ -59,11 +57,11 @@ if __name__ == '__main__':
     data = open(path, 'rb').read(cf.trailer._start)
     print 'Hash:         %s' % sha1(data).digest().encode('hex')
     print 'Siblings:'
-    siblings = [str(sibling) for sibling in mod.siblings]
+    siblings = codlib.utils.quick_get_siblings(path)
     for i, sibling in enumerate(siblings):
         print '    %d: %s' % (i, sibling)
     print 'Dependencies:'
-    imports = [(mod._R.get_escaped_lit(n), mod._R.get_escaped_lit(v)) for n,v in cf.data.modules[1:]]
+    imports = codlib.utils.quick_get_imports(path)
     for i, (n, v) in enumerate(imports):
         print '    %d: %s (%s)' % (i, n, v)
     signer_names = []

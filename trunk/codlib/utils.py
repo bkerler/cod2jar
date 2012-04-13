@@ -30,20 +30,45 @@ utils: Constants and utility functions for CODng.
 from struct import unpack
 from bytecleaver import *
 
-# Quick, limited parsers
+# Quick, limited and fragile parsers whose sole purpose
+# is speedy access of commonly needed pre-parsing info
 #----------------------------------------------------------
+def _get_lit(f, offset):
+    f.seek(offset)
+    data = ''
+    c = f.read(1)
+    while c != '\x00' and c != '':
+        data += c
+        c = f.read(1)
+    return data
+def _get_blob(f, offset, size):
+    f.seek(offset)
+    return f.read(size)
+
+def quick_get_name(cod_path):
+    '''Quickly parse out the main module name from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 4 + 1)
+    num_classes = unpack('B', f.read(1))[0]
+    # data section offset + data header size + class offsets size
+    f.seek(ds_offset + 52 + 2*num_classes)
+    mod_offset = unpack('H', f.read(2))[0]
+    
+    # finally, retrieve the names
+    return _get_lit(f, ds_offset + mod_offset)
+    
 def quick_get_module_names(cod_path):
     '''Quickly parse out the module name and aliases from a COD.'''
-    def _get_lit(f, offset):
-        f.seek(offset)
-        data = ''
-        c = f.read(1)
-        while c != '\x00' and c != '':
-            data += c
-            c = f.read(1)
-        return data
-    
     f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
     # read data section offset
     f.seek(38)
     # header size + code size
@@ -69,6 +94,130 @@ def quick_get_module_names(cod_path):
     # finally, retrieve the names
     names = [_get_lit(f, ds_offset + mod_offset)]
     for each in aliases_offsets:
+        names.append(_get_lit(f, ds_offset + each))
+    return names
+    
+def quick_get_timestamp(cod_path):
+    '''Quickly parse out the timestamp from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    f.seek(12)
+    return unpack('<L', f.read(4))[0]
+
+def quick_get_version(cod_path):
+    '''Quickly parse out the module version from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('<H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 4)
+    num_mods = unpack('<B', f.read(1))[0]
+    num_classes = unpack('<B', f.read(1))[0]
+    # data section offset + data header size + class offsets size + mod names offsets size
+    f.seek(ds_offset + 52 + 2*num_classes + 2*num_mods)
+    # first module (this module)
+    version_offset = unpack('<H', f.read(2))[0]
+    return _get_lit(f, ds_offset + version_offset)
+
+def quick_get_imports(cod_path):
+    '''Quickly parse out the imports (in (name, version) form) from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('<H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 4)
+    num_mods = unpack('<B', f.read(1))[0]
+    num_classes = unpack('<B', f.read(1))[0]
+    f.seek(ds_offset + 6)
+    exports_offset = unpack('<H', f.read(2))[0]
+    f.seek(ds_offset + 28)
+    aliases_offset = unpack('<H', f.read(2))[0]
+    # data section offset + data header size + class offsets size
+    f.seek(ds_offset + 52 + 2*num_classes)
+    num_imports = num_mods - 1
+    f.read(2) # first module (this module)
+    imports_name_offsets = []
+    for i in range(num_imports):
+        imports_name_offsets.append(unpack('<H', f.read(2))[0])
+    f.read(2) # first module (this module)
+    imports_version_offsets = []
+    for i in range(num_imports):
+        imports_version_offsets.append(unpack('<H', f.read(2))[0])
+    imports_offsets = zip(imports_name_offsets, imports_version_offsets)
+    
+    # finally, retrieve the names
+    names = []
+    for n, v in imports_offsets:
+        names.append((_get_lit(f, ds_offset + n), _get_lit(f, ds_offset + v)))
+    return names
+
+def quick_get_exports(cod_path):
+    '''Quickly parse out the exports (in (name, value) form) from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('<H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 6)
+    exports_offset = unpack('<H', f.read(2))[0]
+    data_pool_offset = unpack('<H', f.read(2))[0]
+    # data section offset + data header size + class offsets size
+    f.seek(ds_offset + exports_offset)
+    num_exports = (data_pool_offset - exports_offset) / 6
+    exports_offsets = []
+    for i in range(num_exports):
+        # name offset, length, data offset
+        exports_offsets.append(
+            (unpack('<H', f.read(2))[0],
+             unpack('<H', f.read(2))[0],
+             unpack('<H', f.read(2))[0])
+        )
+    
+    # finally, retrieve the names
+    names = []
+    for n, l, v in exports_offsets:
+        names.append((decode_identifier(_get_lit(f, ds_offset + n)), _get_blob(f, ds_offset + v, l)))
+    return names
+
+def quick_get_siblings(cod_path):
+    '''Quickly parse out the sibling names from a COD.'''
+    f = open(cod_path, 'rb')
+    magic = f.read(4)
+    assert magic == '\xde\xc0\xff\xff', "%s does not contain the correct COD file magic" % cod_path
+    # read data section offset
+    f.seek(38)
+    # header size + code size
+    ds_offset = 44 + unpack('<H', f.read(2))[0]
+    # read info from the data header
+    f.seek(ds_offset + 4)
+    num_mods = unpack('<B', f.read(1))[0]
+    num_classes = unpack('<B', f.read(1))[0]
+    f.seek(ds_offset + 6)
+    exports_offset = unpack('<H', f.read(2))[0]
+    f.seek(ds_offset + 28)
+    aliases_offset = unpack('<H', f.read(2))[0]
+    # data section offset + data header size + class offsets size + module offsets size
+    f.seek(ds_offset + 52 + 2*num_classes + 4*num_mods)
+    num_siblings = ((ds_offset + aliases_offset) - f.tell()) / 2
+    siblings_offsets = []
+    for i in range(num_siblings):
+        siblings_offsets.append(unpack('<H', f.read(2))[0])
+    
+    # finally, retrieve the names
+    names = []
+    for each in siblings_offsets:
         names.append(_get_lit(f, ds_offset + each))
     return names
 

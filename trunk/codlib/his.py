@@ -38,7 +38,7 @@ from itertools import combinations
 GLOBAL_MAX_STACK = 0x200
 
 # the maximum number of rescans of a basic block
-GLOBAL_MAX_RESCAN = 50
+GLOBAL_MAX_RESCAN = 100
 
 class AbortScanning(Exception): pass
 
