@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 
 # Copyright (c) 2012, derrotehund361@googlemail.com
 # All rights reserved.
@@ -287,13 +287,12 @@ class CodNav(wx.ListCtrl):
                 continue
             
             ce.log.WriteText('Parsing %s from COD...\n' % cod_name)
-            cf = codlib.load_cod_file(ce.cod_filenames[cod_name])
         
             self.InsertStringItem(i, cod_name)
             #self.SetItemImage(i, 0)
-            self.SetStringItem(i, 0, cf.data.cod_module_name)
-            self.SetStringItem(i, 1, cf.data.cod_module_version)
-            self.SetStringItem(i, 2, ctime(cf.hdr.timestamp))
+            self.SetStringItem(i, 0, codlib.utils.quick_get_name(ce.cod_filenames[cod_name]))
+            self.SetStringItem(i, 1, codlib.utils.quick_get_version(ce.cod_filenames[cod_name]))
+            self.SetStringItem(i, 2, ctime(codlib.utils.quick_get_timestamp(ce.cod_filenames[cod_name])))
             self.SetStringItem(i, 3, ce.cod_filenames[cod_name])
         ce.log.WriteText('Completed parsing all cod files\n')
 

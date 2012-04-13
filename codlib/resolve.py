@@ -183,6 +183,7 @@ class Loader(object):
                     for name in utils.quick_get_module_names(cod_path):
                         self._module_path_map[name] = cod_path
                     # also give it the file name just in case it is different
+                    # this could lead to bad times if we mistakenly name a cod
                     self._module_path_map[filename[:-4]] = cod_path
                     
 
@@ -336,6 +337,8 @@ class Loader(object):
             cod_name = os.path.split(item)[1]
             if not cod_name.endswith('.cod'):
                 cod_name += cod_name[:-4]
+            elif not cod_name.endswith('.cod.db'):
+                cod_name += cod_name[:-7]
 
             if cod_name in self._module_path_map:
                 return True
@@ -851,7 +854,7 @@ class Module(object):
 
         # Other module-wide stuff
         self.siblings = map(R.get_escaped_lit, ds.siblings)
-        self.aliases = map(R.get_escaped_lit, ds.aliases)   # TODO: verify that aliases are actually string literals
+        self.aliases = map(R.get_escaped_lit, ds.aliases)
         self.exports = [ExportedItem(self, off) for off in ds.exports]
         self.statics = [(sd.address, sd.value) for sd in ds.static_data] # Not sure what these are yet...
 
