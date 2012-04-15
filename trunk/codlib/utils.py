@@ -749,9 +749,9 @@ class TypeList(list):
             return False
         for i in range(len(self)):
             try:
-                    if self[i] < other[i]:
-                        # self is super or equivalent to other
-                        return False
+                if self[i] < other[i]:
+                    # self is super or equivalent to other
+                    return False
             except ValueError:
                 # total type mismatch (like comparing bool to java/lang/String)
                 return False

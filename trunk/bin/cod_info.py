@@ -46,7 +46,14 @@ if __name__ == '__main__':
     _SEARCH_PATH = [os.path.split(path)[0],]
     cf = codlib.load_cod_file(path)
 
-    print 'Name:         %s' % cf.data.cod_module_name
+    names = codlib.utils.quick_get_module_names(path)
+    module_name = names[0]
+    aliases = names[1:]
+    print 'Name:         %s' % module_name
+    if aliases:
+        print 'Aliases:'
+        for alias in aliases:
+            print '    %s' % alias
     exports = codlib.utils.quick_get_exports(path)
     vendor_names = [value for name, value in exports if name == '_vendor']
     if vendor_names:
