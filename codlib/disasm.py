@@ -339,7 +339,7 @@ class Instruction(object):
                     self.operands[0] = offset & 0xff
             else:
                 self.operands[0] = offset # Normal runtime (i.e., dynamic) fixup
-        elif ((_op in _INVOKESTATIC_OP) or (_op in _JUMPSPECIAL_OP) or (_op in _INVOKESPECIAL_OP)) and (not _fixed[0]):
+        elif (_op in _INVOKESTATIC_OP) and (not _fixed[0]):
             try:
                 if len(self._ops[0]) == 3:
                     mod_byte, class_byte, routine_word = self._ops[0]
@@ -353,7 +353,12 @@ class Instruction(object):
                 elif auto_resolve:
                     if mod_byte == 255:
                         # Indexed fixup-lookup
-                        self.operands[0] = mod.method_fixups[routine_word].get_item()
+                        # if there is a list of static method fixups, then the index goes into the static method fixup list
+                        # otherwise it is an index into the method fixup list
+                        if mod.static_method_fixups:
+                            self.operands[0] = mod.static_method_fixups[routine_word].get_item()
+                        else:
+                            self.operands[0] = mod.method_fixups[routine_word].get_item()
                         #mod._L.log("DEBUG: call-lookup; method_fixup[%d] := %s" % (routine_word, self.operands[0]))
                     elif mod_byte <= len(mod.imports):
                         # Address routine lookup within an import module
@@ -388,6 +393,52 @@ class Instruction(object):
             #  from resolve import FixupMethod
             #  if self.operands[0].op, FixupMethod):
             #    self.operands[0].is_static = True
+            
+        elif ((_op in _JUMPSPECIAL_OP) or (_op in _INVOKESPECIAL_OP)) and (not _fixed[0]):
+            try:
+                if len(self._ops[0]) == 3:
+                    mod_byte, class_byte, routine_word = self._ops[0]
+                else:
+                    mod_byte, routine_word = self._ops[0]
+
+                if mod_byte == 0:
+                    # Address routine lookup within our own module (already resolved, for sure)
+                    self.operands[0] = mod._routine_map[routine_word]
+                    #mod._L.log("DEBUG: call-lookup; method_offset[%d] := %s" % (routine_word, self.operands[0]))
+                elif auto_resolve:
+                    if mod_byte == 255:
+                        # Indexed fixup-lookup
+                        self.operands[0] = mod.method_fixups[routine_word].get_item()
+                        '''
+                        # for some reason there are sometimes direct indexes into the static fixup list
+                        if (_op in _INVOKESTATIC_OP) and not self.operands[0].is_static:
+                            self.operands[0] = mod.static_method_fixups[routine_word].get_item()
+                        '''
+                        #mod._L.log("DEBUG: call-lookup; method_fixup[%d] := %s" % (routine_word, self.operands[0]))
+                    elif mod_byte <= len(mod.imports):
+                        # Address routine lookup within an import module
+                        try:
+                            imod = mod.imports[mod_byte - 1]
+                        except IndexError as err:
+                            raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
+                        self.operands[0] = imod._routine_map[routine_word]
+                        #mod._L.log("DEBUG: call-lookup; module[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
+                    elif not mod._disk:
+                        # Try module-remapping (only in heap-mode)
+                        try:
+                            imod = mod._mod_remap[mod_byte] # NOT (mod_byte - 1)!!!  Trust me!
+                        except KeyError as err:
+                            raise Exception("bad_call_ref[%d:%s:%d]" % (mod_byte, class_byte if (len(self._ops[0]) == 3) else '', routine_word))
+                        self.operands[0] = imod._routine_map[routine_word]
+                        #mod._L.log("DEBUG: call-lookup; module_remap[%d].offset[%d] := %s" % (mod_byte, routine_word, self.operands[0]))
+            except Exception as e:
+                mod._L.log("WARNING: %s" % e)
+                dump = StringIO()
+                traceback.print_exc(file=dump)
+                dump.seek(0)
+                dump = dump.read()
+                mod._L.log(dump)
+                self.operands[0] = BadOperand(e)
             
         elif ((_op in _INVOKEVIRTUAL_OP) or (_op in _INVOKEVIRTUAL_SHORT_OP)) and (not _fixed[0]):
             offset = self._ops[0]

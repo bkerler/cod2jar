@@ -35,9 +35,6 @@ from StringIO import StringIO
 import gc
 import codlib
 
-# when dealing with a large number of cod files, we have to periodically flush the loader..
-# in individual mode, when we have loaded this many cod files, flush the loader
-MAX_LOADED_MODULES = 350
 
 class Progress(object):
     def __init__(self, caption, total):
@@ -118,6 +115,7 @@ class Cod2Jar(object):
 
         # dump mode
         self.individual_mode = options.individual_mode
+        self.max_module_count = options.max_module_count
         if self._format == 'cache':
             if options.cache_root is not None:
                 self.log("ERROR: cannot specify a cache root for cache creation; aborting...")
@@ -488,7 +486,7 @@ class Cod2Jar(object):
         ticks = 0
         P.update(ticks)
         while cods_to_dump:
-            if len(self._loader._modules) > MAX_LOADED_MODULES:
+            if len(self._loader._modules) > self.max_module_count:
                 self._loader = codlib.Loader(
                     self._load_paths,
                     cache_root=self._cache_root,
@@ -520,12 +518,17 @@ class Cod2Jar(object):
                     m.disasm(False)
                 # dump
                 self._module_dumper(m)
+                
+                # flush logs
+                self._make_log.flush()
+                self._loader_log.flush()
+                self._hiscan_log.flush()
 
                 ticks += 1
                 P.update(ticks)
             except MemoryError:
                 # urgh, ran out of memory, bail...
-                self.log("ERROR: ran out of memory on module '%s' with %d cods loaded, aborting..." % (cod_name, len(self._loader._modules)))
+                self.log("ERROR: ran out of memory on module '%s' with %d CODs loaded, aborting..." % (cod_name, len(self._loader._modules)))
                 del self._loader
                 gc.collect()
                 sys.exit(1)
@@ -588,7 +591,9 @@ if __name__ == "__main__":
     OP.add_option("-f", "--format", dest="format", default="jar", metavar="FORMAT",
                     help="generate output dump a specific FORMAT: [%s]" % ', '.join(Cod2Jar.DUMP_FORMATS))
     OP.add_option("-i", "--individual-mode", dest="individual_mode", action="store_true", default=False,
-                    help="Dumping mode resistant to running low on memory, yet less informative")
+                    help="Dumping mode resistant to running low on memory, yet less informative (forced for cache dumps)")
+    OP.add_option("-m", "--max-module-count", dest="max_module_count", type="int", default=350,
+                    help="Number of loaded modules at witch to purge the loader in individual mode (decrease if you encounter MemoryErrors)")
     #OP.add_option("-x", "--no-update", dest="no_update", action="store_false", default=True,
     #                help="Do not update dump files if they already exist (always perform a backup if in doubt)")
     OP.add_option("-s", "--no-hiscan", dest="hiscan", action="store_false", default=True,

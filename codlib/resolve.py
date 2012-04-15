@@ -1749,24 +1749,6 @@ class ClassDef(object):
                         c_fields = [c for c in candidates if isinstance(c, FieldDef) if m_type.is_super_or_implements_or_equivalent(c.type)]
                 else:
                     c_fields = [c for c in candidates if isinstance(c, FieldDef)]
-                # TODO: remove
-                ''''''
-                if len(c_fields) != 1:
-                    if m_name == '_screen':
-                        print
-                        print self
-                        print m_name,
-                        print '(%s)' % m_type
-                        print 'Fields:'
-                        for f in self.fields:
-                            print '    %s in %s' % (f.java_def(), f.parent)
-                        print 'Static fields:'
-                        for f in self.static_fields:
-                            print '    %s in %s' % (f.java_def(), f.parent)
-                        print 'Matches:'
-                        for f in c_fields:
-                            print '    %s in %s' % (f.java_def(), f.parent)
-                ''''''
                 
                 if m_type:
                     assert len(c_fields) == 1, "Class '%s' has %d fields named '%s' of type '%s' (Oops...)" % (self, len(c_fields), m_name, m_type)
@@ -1791,18 +1773,21 @@ class ClassDef(object):
                     for c in c_methods:
                         if m_type.is_super_or_implements_or_equivalent(c.param_types):
                             return c
+                    '''
                     else:
-                        # ooooh, this is a bad bad thing
-                        # return this if no better candidate is found
                         try:
                             inherited_c = self.superclass.get_member_by_name(m_name, m_type, is_field)
                             if m_type.is_super_or_implements_or_equivalent(inherited_c.param_types):
                                 return inherited_c
                         except ValueError:
                             pass
-                        self.module._L.log("WARNING: Could not find match for %s(%s)... Selecting %s" % (m_name, m_type, c))
-                        return c
-                raise KeyError()
+
+                    # ooooh, this is a bad bad thing
+                    # return this if no better candidate is found
+                    self.module._L.log("WARNING: Could not find match for %s(%s) in class %s in module %s... Selecting %s" % (m_name, m_type, self, str(self.module), c))
+                    return c
+                    '''
+            raise KeyError()
 
         except KeyError as err:
             '''
@@ -1828,7 +1813,6 @@ class ClassDef(object):
                     for i, c in enumerate(c_methods):
                         print >>sys.stderr, i,
                         print >>sys.stderr, c.param_types
-                    print repr(c.param_types[1])
                     print '    Super:',
                     print [x.type.superclass for x in c.param_types][1]
                     print '    Iface:',
@@ -1860,11 +1844,11 @@ class ClassDef(object):
                     # we want this error to happen on the original class
                     pass
 
-            # If lookup failed, return a bad name ref
-            if is_field:
-                raise ValueError("Unresolved field name: (%s, %s, %s)" % (self, m_name, m_type))
-            else:
-                raise ValueError("Unresolved method name: (%s, %s, %s)" % (self, m_name, m_type))
+        # If lookup failed, return a bad name ref
+        if is_field:
+            raise ValueError("Unresolved field name: (%s, %s, %s)" % (self, m_name, m_type))
+        else:
+            raise ValueError("Unresolved method name: (%s, %s, %s)" % (self, m_name, m_type))
 
     def _get_super_vft(self):
         '''Get our superclass's virtual function table (VFT).
@@ -2043,24 +2027,21 @@ class ClassDef(object):
         '''Returns True if other is implemented by self.'''
         for iface in self.ifaces:
             # we implement it
-            if str(other) == str(iface):
+            if str(iface) == str(other):
                 return True
-            # or if our interface is some subclass of it
+            # our interface is some subclass of it
             if iface.is_super(other):
                 return True
-            if iface in other.ifaces:
+            # maybe our interface implements it
+            if iface.implements(other):
                 return True
-            # or if our interface is implements it???
-            # switching these makes it go away.... uh. so tempting.
-            #if iface.implements(other):
-            #    return True
         return False
 
     def __cmp__(self, other):
         sself = str(self)
         sother = str(other)
         if str(self) == str(other):
-            return True
+            return 0
         # gt => more defined (ie String > Object)
         if self.is_super(other):
             return 1
@@ -2072,6 +2053,19 @@ class ClassDef(object):
         if other.implements(self):
             return -1
         raise ValueError('Type compare mismatch: %s and %s' % (sself, sother))
+
+    def __eq__(self, other):
+        sself = str(self)
+        sother = str(other)
+        if str(self) == str(other):
+            return True
+        return False
+    def __ne__(self, other):
+        sself = str(self)
+        sother = str(other)
+        if str(self) != str(other):
+            return True
+        return False
 
     def __str__(self):
         # See how easy?!
