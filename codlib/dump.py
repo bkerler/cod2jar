@@ -68,6 +68,8 @@ class TextDumper(object):
 class UnresolvedDumper(TextDumper):
     '''Dumper for unresolved modules/classes.'''
     def dump_module(self, M, verbose=False):
+        M.disasm(auto_resolve=False)
+        
         self.out("Module: %s (v. %s) @ %s" % (M.name, M.version, time.ctime(M.timestamp)))
         self.hr()
         if M.attrs:

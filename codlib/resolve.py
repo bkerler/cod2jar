@@ -349,6 +349,14 @@ class Loader(object):
             raise LoadError("Unknown type for __contains__ in loader: %s (%s)" % (str(item), str(type(item))))
         return False
         
+    def unload_module(self, name):
+        '''Unload a module from the memory cache'''
+        name = os.path.splitext(os.path.basename(name))[0]
+        if name in self._modules:
+            for alias in self._modules[name].aliases:
+                del self._modules[alias]
+            del self._modules[name]
+
     def load_module(self, name):
         '''Load a module from the search path'''
         # This line is convenient and fast (because it ignores the full path and just
@@ -1279,7 +1287,10 @@ class RoutineDef(object):
         self._disasmed = True
 
         # Disassemble/fixup all instructions
-        self.instructions = [instr.fixup(self, auto_resolve=auto_resolve) for instr in disasm.disassembly(self)]
+        self.instructions = [instr for instr in disasm.disassembly(self)]
+        # Fixup all instructions
+        if auto_resolve:
+            self.instructions = [instr.fixup(self, auto_resolve=auto_resolve) for instr in self.instructions]
 
         # Parse/fixup exception handlers
         if auto_resolve:
