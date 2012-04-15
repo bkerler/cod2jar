@@ -110,7 +110,7 @@ class HILogger(object):
     
     def log(self, msg=''):
         if self._header:
-            print >> self._logfile, "SUB: %s" % self._header
+            print >>self._logfile, "SUB: %s" % self._header
             self._header = None
         _fputs = self._logfile.write
         _fputs(self._indent)
@@ -627,7 +627,7 @@ class HIScanner(object):
                     
                 raise Exception('Exhausted basic block candidates while trying to scan failed basic blocks: %s' % [str(x) for x in failed])
         except Exception as err:
-            print err
+            print >>self._logfile, err
             if count:
                 count -= 1
                 self.log('WARNING: Attempting rescan (%d tries left)' % count)
