@@ -37,7 +37,7 @@ from dump import PackageDumper, BinaryDumper, SerialDumper
 from dump import JasminDumper, ClassDumper
 import instruction_reference
 from analysis import Subroutine, BasicBlock
-from his import HIScanner
+from his import HILogger, HIScanner
 import bytecleaver
 
 __all__ = ['utils', 'format', 'resolve', 'dump']

@@ -75,8 +75,9 @@ ID_EXPORT_CURRENT=404
 ID_EXPORT_SELECTION=405
 ID_FUNCTION_SIBLINGS = 410
 ID_FUNCTION_SELECTED = 411
-ID_RENAME_ROUTINE=412
-ID_RENAME_FIELD=413
+ID_DEPENDENCY_GRAPH = 412
+ID_RENAME_ROUTINE=413
+ID_RENAME_FIELD=414
 
 
 #wildcard = "Binary file (*.bin)|*.bin|"     \
@@ -145,7 +146,8 @@ class PackageNav(wx.TreeCtrl):
 
         if cod_name:
             package_name = self.get_package_name(self.menu_item)
-            ce.function_flow_graph_package(package_name)
+            cod = ce.cods[cod_name]
+            ce.function_flow_graph_package(package_name, cod)
 
     def OnMenuFunctionGraph(self, event):
         global ce
@@ -153,8 +155,8 @@ class PackageNav(wx.TreeCtrl):
 
         if cod_name:
             package_name = self.get_package_name(self.menu_item)
-            class_def = ce.loader.load_class(package_name)
             cod = ce.cods[cod_name]
+            class_def = cod.load_class(package_name)
             routine_defs = {}
             for routine_def in class_def.routines:
                 name = '%s' % routine_def.java_def(params_on_newlines = False)
@@ -173,13 +175,13 @@ class PackageNav(wx.TreeCtrl):
                 dlg.Destroy()
                 
                 # This is a horrible hack (needs to be x-platform)
-                subr = codlib.Subroutine(routine)
+                hi_scanner = codlib.HIScanner(routine)
                 try:
-                    ce.hi_scanner.scan(subr)
+                    hi_scanner.scan()
                 except:
                     print "Error HIscanning %s; type information will be incomplete..." % routine
                     traceback.print_exc()
-                subr.to_gdl_file("subroutine.gdl")
+                hi_scanner.sub.to_gdl_file("subroutine.gdl")
                 os.system("start subroutine.gdl")
                 return
             else:
@@ -859,13 +861,13 @@ class JavaBrowser(stc.StyledTextCtrl):
                 dlg.Destroy()
                 
                 # This is a horrible hack (needs to be x-platform)
-                subr = codlib.Subroutine(routine)
+                hi_scanner = codlib.HIScanner(routine)
                 try:
-                    ce.hi_scanner.scan(subr)
+                    hi_scanner.scan()
                 except:
                     print "Error HIscanning %s; type information will be incomplete..." % routine
                     traceback.print_exc()
-                subr.to_gdl_file("subroutine.gdl")
+                hi_scanner.sub.to_gdl_file("subroutine.gdl")
                 os.system("start subroutine.gdl")
                 return
                 
@@ -1149,6 +1151,7 @@ class CodExplorer(wx.Frame):
         tb.AddSeparator()
         tb.AddSimpleTool(ID_FUNCTION_SIBLINGS, wx.ArtProvider.GetBitmap(wx.ART_REPORT_VIEW, wx.ART_TOOLBAR, tsize), 'Display function call graph for all siblings of currently selected cod')
         tb.AddSimpleTool(ID_FUNCTION_SELECTED, wx.ArtProvider.GetBitmap(wx.ART_REPORT_VIEW, wx.ART_TOOLBAR, tsize), 'Display function call graph for currently selected cod')
+        tb.AddSimpleTool(ID_DEPENDENCY_GRAPH, wx.ArtProvider.GetBitmap(wx.ART_REPORT_VIEW, wx.ART_TOOLBAR, tsize), 'Display dependency graph for all cods')
         tb.AddSeparator()
         tb.AddSimpleTool(ID_RENAME_ROUTINE, wx.ArtProvider.GetBitmap(wx.ART_INFORMATION, wx.ART_TOOLBAR, tsize), 'Rename a routine')
         tb.AddSimpleTool(ID_RENAME_FIELD, wx.ArtProvider.GetBitmap(wx.ART_INFORMATION, wx.ART_TOOLBAR, tsize), 'Rename a field')
@@ -1161,6 +1164,7 @@ class CodExplorer(wx.Frame):
         self.Bind(wx.EVT_TOOL, self.OnExportSelection, id=ID_EXPORT_SELECTION)
         self.Bind(wx.EVT_TOOL, self.OnFunctionSiblings, id=ID_FUNCTION_SIBLINGS)
         self.Bind(wx.EVT_TOOL, self.OnFunctionSelected, id=ID_FUNCTION_SELECTED)
+        self.Bind(wx.EVT_TOOL, self.OnDependencyGraph, id=ID_DEPENDENCY_GRAPH)
         self.Bind(wx.EVT_TOOL, self.OnRenameRoutine, id=ID_RENAME_ROUTINE)
         self.Bind(wx.EVT_TOOL, self.OnRenameField, id=ID_RENAME_FIELD)
 
@@ -1233,7 +1237,6 @@ class CodExplorer(wx.Frame):
             if not self.cache_path:
                 self.cache_path = self.find_cache_path()
             self.loader = codlib.Loader(self.paths, cache_root=self.cache_path, auto_resolve=True, log_file=self.log)
-            self.hi_scanner = codlib.HIScanner(self.loader)
             self.cods = {}
             self.cod_filenames = {}
             self.cod_names = []
@@ -1571,6 +1574,30 @@ class CodExplorer(wx.Frame):
             self.sb.SetStatusText('Export completed')
             self.log.WriteText('Export completed\n')
 
+    def dependency_graph(self, title = 'Dependency flow graph'):
+        dependencies = set()
+        for cod_name in self.cod_names:
+            deps = [n for n, v in codlib.utils.quick_get_imports(self.cod_filenames[cod_name])]
+            for dep in deps:
+                dependencies.add((cod_name, dep))
+
+        gdl_filename = 'dependency_graph.gdl'
+        with open(gdl_filename, 'wt') as fd:
+            print >> fd, 'graph:{title:"%s"' % title
+            print >> fd, 'layoutalgorithm: minbackward\nyspace:210'
+            #print >> fd, '/*layoutalgorithm: mindepth*/'
+            for cod_name in self.cod_names:
+                label = "%s" % (cod_name)
+                border_col = 'black'
+                print >> fd, 'node:{title:"%s" bordercolor:%s label:"%s"}' % (cod_name, border_col, label)
+            for cod, cod_dep in dependencies:
+                extra = ''
+                print >> fd, 'edge:{sourcename:"%s" targetname:"%s" %s}' % (cod, cod_dep, extra)
+                
+            print >> fd, '}'
+        os.system('start %s' % gdl_filename)
+        return
+
     def function_flow_graph(self, selected_functions, title = 'Function flow graph'):
         # set of all function either called or calling
         function_names = set()
@@ -1582,9 +1609,8 @@ class CodExplorer(wx.Frame):
             function_names.add(function_name)
 
             # perform a hiscan for better analysis
-            subroutine = codlib.Subroutine(function)
             try:
-                self.hi_scanner.scan(subroutine)
+                codlib.HIScanner(function).scan()
             except Exception, e:
                 print >>self.log, 'Could not scan routine %s: %s' % (function.to_jts(), str(e))
             
@@ -1615,8 +1641,8 @@ class CodExplorer(wx.Frame):
         os.system('start %s' % gdl_filename)
         return
 
-    def function_flow_graph_package(self, package_name):
-        functions = self.loader.load_class(package_name).routines
+    def function_flow_graph_package(self, package_name, cod):
+        functions = cod.load_class(package_name).routines
         title = 'Function flow graph of class %s' % package_name
         self.function_flow_graph(functions, title)
        
@@ -1643,6 +1669,10 @@ class CodExplorer(wx.Frame):
                 functions += cod_class.routines
             title = 'Function flow graph for %s' % cod_name
             self.function_flow_graph(functions, title)
+            
+    def OnDependencyGraph(self, event):
+        title = 'Dependency graph'
+        self.dependency_graph(title)
 
     def OnOpenNameDB(self, event):
         if self.loader:

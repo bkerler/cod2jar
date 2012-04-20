@@ -114,6 +114,7 @@ class Cod2Jar(object):
         self._hiscan_log = open(os.path.join(self._out_path, "hiscan.log"), 'wt')
 
         # dump mode
+        self.application_dump = options.application_dump
         self.individual_mode = options.individual_mode
         self.max_module_count = options.max_module_count
         if self._format == 'cache':
@@ -221,19 +222,29 @@ class Cod2Jar(object):
             print "Stripped-member renaming enabled (name DB: '%s')" % self._name_db
 
     def do_xml_dump(self, module):
-        dump_file = os.path.join(self._out_path, module.name + ".cod.xml")
+        if self.application_dump:
+            dump_file = os.path.join(self._out_path, module.get_base_module_name(), module.name + ".cod.xml")
+        else:
+            dump_file = os.path.join(self._out_path, module.name + ".cod.xml")
+        
         with open(dump_file, 'wt') as fd:
             XD = codlib.XMLDumper(fd, self._make_log)
             XD.dump_cod(module._cf)
 
     def do_debugtext_dump(self, module):
-        dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
+        if self.application_dump:
+            dump_file = os.path.join(self._out_path, module.get_base_module_name(), module.name + ".cod.txt")
+        else:
+            dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
         with open(dump_file, 'wt') as fd:
             UD = codlib.UnresolvedDumper(fd, self._make_log)
             UD.dump_module(module, True)
 
     def do_text_dump(self, module):
-        dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
+        if self.application_dump:
+            dump_file = os.path.join(self._out_path, module.get_base_module_name(), module.name + ".cod.txt")
+        else:
+            dump_file = os.path.join(self._out_path, module.name + ".cod.txt")
         with open(dump_file, 'wt') as fd:
             RD = codlib.ResolvedDumper(fd, self._make_log)
             RD.dump_module(module, True)
@@ -247,7 +258,7 @@ class Cod2Jar(object):
             JD = self._jasmin_dumper
         except AttributeError:
             #self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
-            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log)
+            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, application_level=self.application_dump)
 
         for cdef in module.classes:
             JD.dump_class(cdef)
@@ -257,13 +268,13 @@ class Cod2Jar(object):
             JD = self._jasmin_dumper
         except AttributeError:
             #self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, self._no_update)
-            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log)
+            self._jasmin_dumper = JD = codlib.JasminDumper(self._out_path, self._make_log, application_level=self.application_dump)
 
         try:
             CD = self._class_dumper
         except AttributeError:
             #self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log, self._no_update)
-            self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log)
+            self._class_dumper = CD = codlib.ClassDumper(self._out_path, self._make_log, application_level=self.application_dump)
 
         error = None
         for cdef in module.classes:
@@ -396,15 +407,15 @@ class Cod2Jar(object):
 
             # If hiscan is enabled, HIScan all the routines in all our loaded modules
             if self._hiscan:
-                H = codlib.HIScanner(self._loader, self._hiscan_log)
+                hi_logger = codlib.HILogger(self._hiscan_log)
                 P = Progress("Analyzing/scanning routines", num_routines)
                 ticks = 0
                 P.update(ticks)
                 for m in loaded_cods:
                     for rdef in m.routines:
                         try:
-                            sub = codlib.Subroutine(rdef)
-                            H.scan(sub)
+                            H = codlib.HIScanner(rdef, hi_logger)
+                            H.scan()
                         except KeyboardInterrupt:
                             raise
                         except Exception as err:
@@ -414,8 +425,8 @@ class Cod2Jar(object):
                             ticks += 1
                             P.update(ticks)
                 print
-                H.dump_stats()
-                H.dump_bad_subs()
+                hi_logger.dump_stats()
+                hi_logger.dump_bad_subs()
 
             # If caching is enabled (and not read-only), dump our loaded modules into the cache
             # temporarily disabled to make things simpler
@@ -481,12 +492,15 @@ class Cod2Jar(object):
         cods_to_dump = self._cods
         cods_to_dump.sort()
 
+        if self._hiscan:
+            hi_logger = codlib.HILogger(self._hiscan_log)
         errors = 0
         P = Progress("Dumping modules", len(cods_to_dump))
         ticks = 0
         P.update(ticks)
         while cods_to_dump:
             if len(self._loader._modules) > self.max_module_count:
+                self.log("WARNING: flushing loader with %d CODs loaded, aborting..." % len(self._loader._modules))
                 self._loader = codlib.Loader(
                     self._load_paths,
                     cache_root=self._cache_root,
@@ -504,11 +518,10 @@ class Cod2Jar(object):
                     m.resolve().actualize().disasm()
                     # hiscan if we need to
                     if self._hiscan:
-                        H = codlib.HIScanner(self._loader, self._hiscan_log)
                         for rdef in m.routines:
                             try:
-                                sub = codlib.Subroutine(rdef)
-                                H.scan(sub)
+                                H = codlib.HIScanner(rdef, hi_logger)
+                                H.scan()
                             except KeyboardInterrupt:
                                 raise
                             except Exception as err:
@@ -538,42 +551,57 @@ class Cod2Jar(object):
                 self.log("ERROR: failed to dump COD '%s'..." % cod_name)
                 traceback.print_exc(file=self._make_log)
                 errors += 1
+                ticks += 1
+                P.update(ticks)
 
+        if self._hiscan:
+            hi_logger.dump_stats()
+            hi_logger.dump_bad_subs()
         self.wrap_up()
         if errors:
             print
             print 'There were %d errors while dumping modules.  See the log files in "%s" for details.' % (errors, self._out_path)
         print
 
+    def zip_up(self, path, out_filename, zip_extensions):
+        try:
+            zf = zipfile.ZipFile(out_filename, 'w', zipfile.ZIP_DEFLATED)
+        except RuntimeError:
+            # could not find zlib
+            zf = zipfile.ZipFile(out_filename, 'w', zipfile.ZIP_STORED)
+        for dirpath, dirnames, filenames in os.walk(path):
+            for filename in filenames:
+                source_file_path = os.path.join(dirpath, filename)
+                relpath = os.path.relpath(source_file_path, path)
+                if [x for x in zip_extensions if filename.endswith(x)]:
+                    zf.write(source_file_path, relpath)
+        zf.close()
+
     def wrap_up(self):
         # for jar and cache formats we need to zip up our results
         # after dumping the modules
         if self._format == 'jar':
-            try:
-                zf = zipfile.ZipFile(self._out_path + '.jar', 'w', zipfile.ZIP_DEFLATED)
-            except RuntimeError:
-                # could not find zlib
-                zf = zipfile.ZipFile(self._out_path + '.jar', 'w', zipfile.ZIP_STORED)
-            for dirpath, dirnames, filenames in os.walk(self._out_path):
-                for filename in filenames:
-                    source_file_path = os.path.join(dirpath, filename)
-                    relpath = os.path.relpath(source_file_path, self._out_path)
-                    if filename.endswith('.class'):
-                        zf.write(source_file_path, relpath)
-            zf.close()
+            if self.application_dump:
+                application_names = [x for x in os.listdir(self._out_path) if os.path.isdir(os.path.join(self._out_path, x))]
+                for application_name in application_names:
+                    self.zip_up(
+                        os.path.join(self._out_path, application_name),
+                        os.path.join(self._out_path, application_name) + '.jar',
+                        zip_extensions=['.class',],
+                    )
+            else:
+                self.zip_up(
+                    self._out_path,
+                    self._out_path + '.jar',
+                    zip_extensions=['.class',],
+                )
         elif self._format == 'cache':
-            try:
-                zf = zipfile.ZipFile(self._out_path + '.zip', 'w', zipfile.ZIP_DEFLATED)
-            except RuntimeError:
-                # could not find zlib
-                zf = zipfile.ZipFile(self._out_path + '.zip', 'w', zipfile.ZIP_STORED)
-            for dirpath, dirnames, filenames in os.walk(self._out_path):
-                for filename in filenames:
-                    source_file_path = os.path.join(dirpath, filename)
-                    relpath = os.path.relpath(source_file_path, self._out_path)
-                    if filename.endswith('.cache') or filename.endswith('.db'):
-                        zf.write(source_file_path, relpath)
-            zf.close()
+            # caches are always application level (dealt with internally)
+            self.zip_up(
+                self._out_path,
+                self._out_path + '.zip',
+                zip_extensions=['.cache', '.db', '.log',],
+            )
 
 
 if __name__ == "__main__":
@@ -590,10 +618,12 @@ if __name__ == "__main__":
                     help="save output dump in PATH")
     OP.add_option("-f", "--format", dest="format", default="jar", metavar="FORMAT",
                     help="generate output dump a specific FORMAT: [%s]" % ', '.join(Cod2Jar.DUMP_FORMATS))
+    OP.add_option("-a", "--application-dump", dest="application_dump", action="store_true", default=False,
+                    help="Create dumps per application rather than a global dump (necessary between CODs with identical classpaths)")
     OP.add_option("-i", "--individual-mode", dest="individual_mode", action="store_true", default=False,
                     help="Dumping mode resistant to running low on memory, yet less informative (forced for cache dumps)")
-    OP.add_option("-m", "--max-module-count", dest="max_module_count", type="int", default=350,
-                    help="Number of loaded modules at witch to purge the loader in individual mode (decrease if you encounter MemoryErrors)")
+    OP.add_option("-m", "--max-module-count", dest="max_module_count", type="int", default=400,
+                    help="number of loaded modules at which to purge the loader in individual mode (decrease if you encounter MemoryErrors)")
     #OP.add_option("-x", "--no-update", dest="no_update", action="store_false", default=True,
     #                help="Do not update dump files if they already exist (always perform a backup if in doubt)")
     OP.add_option("-s", "--no-hiscan", dest="hiscan", action="store_false", default=True,
