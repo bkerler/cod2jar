@@ -448,23 +448,27 @@ class SerialDumper(object):
 
         # Dump a module-index db file (a pickled-dictionary)
         module_db_path = os.path.join(self._root, M.name + ".cod.db")
-        with open(module_db_path, 'wt') as fd:
-            cPickle.dump({
-                'name': M.name,
-                'version': M.version,
-                'timestamp': M.timestamp,
-                'attrs': M.attrs.keys(),
-                'siblings': M.siblings,
-                'imports': [I.name for I in M.imports],
-                'import_versions': M.import_versions,
-                'aliases': M.aliases,
-                'exports': [X.serialize() for X in M.exports],
-                'entry_points': [EP.serialize() for EP in M.entry_points],
-                'statics': M.statics,
-                'classes': map(str, M.classes),
-                'routines': [R.serialize() for R in M.routines],
-                'signatures': [S.serialize() for S in M.signatures]
-            }, fd)
+        try:
+            with open(module_db_path, 'wt') as fd:
+                cPickle.dump({
+                    'name': M.name,
+                    'version': M.version,
+                    'timestamp': M.timestamp,
+                    'attrs': M.attrs.keys(),
+                    'siblings': M.siblings,
+                    'imports': [I.name for I in M.imports],
+                    'import_versions': M.import_versions,
+                    'aliases': M.aliases,
+                    'exports': [X.serialize() for X in M.exports],
+                    'entry_points': [EP.serialize() for EP in M.entry_points],
+                    'statics': M.statics,
+                    'classes': map(str, M.classes),
+                    'routines': [R.serialize() for R in M.routines],
+                    'signatures': [S.serialize() for S in M.signatures]
+                }, fd)
+        except:
+            os.remove(module_db_path)
+            raise
 
         # Then dump all the classes as .cache files (organized by package/class hierarchy)
         for C in M.classes:
@@ -472,7 +476,7 @@ class SerialDumper(object):
 
     def _class_cache_file(self, class_def):
         packpath = class_def.package.replace('/', os.path.sep)
-        dirpath = os.path.join(self._root, packpath)
+        dirpath = os.path.join(self._root, class_def.module.get_base_module_name(), packpath)
 
         # POTENTIAL RACE CONDITION (which I don't really care about...)
         if not os.path.exists(dirpath):
@@ -484,21 +488,32 @@ class SerialDumper(object):
     def dump_class(self, C, module_name):
         import cPickle
 
-        with open(self._class_cache_file(C), 'wt') as fd:
-            cPickle.dump({
-                'module': module_name,
-                'name': str(C),
-                'superclass': str(C.superclass) if C.superclass else None,
-                'ifaces': map(str, C.ifaces),
-                'attrs': C.attrs.keys(),
-                'fields': [F.serialize() for F in C.fields],
-                'static_fields': [F.serialize() for F in C.static_fields],
-                'virtual_methods': map(self.dump_method, C.virtual_methods),
-                'nonvirtual_methods': map(self.dump_method, C.nonvirtual_methods),
-                'static_methods': map(self.dump_method, C.static_methods),
-                'vft': [vm.to_jts(False) for vm in C.vft],
-                'fft': [f.to_jts(False) for f in C.fft],
-            }, fd)
+        # NOTE: we could make this more efficient by making *_modules
+        # an index into the imports list +1 rather than the full name
+        # TODO: delete *_modules
+        try:
+            with open(self._class_cache_file(C), 'wt') as fd:
+                cPickle.dump({
+                    'module': module_name,
+                    'name': str(C),
+                    'superclass': str(C.superclass) if C.superclass else None,
+                    'superclass_module': str(C.superclass.module.get_base_module_name()) if C.superclass else None,
+                    'ifaces': map(str, C.ifaces),
+                    'ifaces_modules': [str(iface.module.get_base_module_name()) for iface in C.ifaces],
+                    'attrs': C.attrs.keys(),
+                    'fields': [F.serialize() for F in C.fields],
+                    'static_fields': [F.serialize() for F in C.static_fields],
+                    'virtual_methods': map(self.dump_method, C.virtual_methods),
+                    'nonvirtual_methods': map(self.dump_method, C.nonvirtual_methods),
+                    'static_methods': map(self.dump_method, C.static_methods),
+                    'vft': [vm.to_jts(False) for vm in C.vft],
+                    'vft_modules': [vm.module.get_base_module_name() for vm in C.vft],
+                    'fft': [f.to_jts(False) for f in C.fft],
+                    'fft_modules': [f.parent.module.get_base_module_name() for f in C.fft],
+                }, fd)
+        except:
+            os.remove(self._class_cache_file(C))
+            raise
 
     def dump_method(self, M):
         return {
@@ -654,9 +669,10 @@ class BinaryDumper(object):
 
 class JasminDumper(object):
     '''JasminXT file format dumper.'''
-    def __init__(self, package_root='.', log_file=sys.stderr, force_update=True):
+    def __init__(self, package_root='.', log_file=sys.stderr, application_level=False, force_update=True):
         self._root = package_root
         self._log = log_file
+        self._application_level = application_level
         self._force_update = force_update
 
     def log(self, msg):
@@ -664,7 +680,10 @@ class JasminDumper(object):
 
     def _jasmin_src_file(self, class_def):
         packpath = class_def.package.replace('/', os.path.sep)
-        dirpath = os.path.join(self._root, packpath)
+        if self._application_level:
+            dirpath = os.path.join(self._root, class_def.module.get_base_module_name(), packpath)
+        else:
+            dirpath = os.path.join(self._root, packpath)
 
         # POTENTIAL RACE CONDITION (which I don't really care about...)
         if not os.path.exists(dirpath):
@@ -680,6 +699,10 @@ class JasminDumper(object):
         print >>fd, ""
 
     def dump_class(self, class_def):
+        if not self._force_update and not self._application_level and os.path.isfile(self._jasmin_src_file(class_def)):
+            # this file already exists!!!
+            # this means another application has a class with the same classpath
+            self.log('WARNING: Jasmin dump of %s already exists. Consider dumping per application (-a argument in cod2jar) identical classpath dump names.' % str(class_def))
         if self._force_update or not os.path.isfile(self._jasmin_src_file(class_def)):
             with open(self._jasmin_src_file(class_def), 'w') as fd:
                 self.std_comments(class_def, fd)
@@ -687,9 +710,10 @@ class JasminDumper(object):
 
 class ClassDumper(object):
     '''JVM class file format dumper.'''
-    def __init__(self, jasmin_root='.', log_file=sys.stderr, force_update=True):
+    def __init__(self, jasmin_root='.', log_file=sys.stderr, application_level=False, force_update=True):
         self._root = jasmin_root
         self._log = log_file
+        self._application_level = application_level
         self._force_update = force_update
         # find jasmin.jar in the PATH environment variable
         self._jasmin_path = None
@@ -703,24 +727,36 @@ class ClassDumper(object):
     def log(self, msg):
         print >> self._log, msg
 
+    '''
     def dump(self):
         for dirpath, dirnames, filenames in os.walk(self._root):
             for filename in filenames:
                 source_file_path = os.path.join(dirpath, filename)
                 if filename.endswith('.j'):
                     if self._force_update or not os.path.isfile(source_file_path[:-2]+'.class'):
-                        sub = Popen(["java", "-jar", self._jasmin_path, "-d", self._root, source_file_path], stdout=PIPE, stderr=PIPE, env=os.environ)
+                        if self._application_level:
+                            dump_root = os.path.join(self._root)
+                        else:
+                            dump_root = self._root
+                        # TODO:
+                        sub = Popen(["java", "-jar", self._jasmin_path, "-d", dump_root, source_file_path], stdout=PIPE, stderr=PIPE, env=os.environ)
                         jout, jerr = sub.communicate()
                         print >> self._log, '\n'.join(filter(lambda x: x != '', [jout, jerr]))
                         if jerr:
                             raise(Exception('"' + jerr + '"'))
+    '''
 
     def dump_class(self, class_def):
-        jasmin_path = os.path.join(self._root, class_def.to_jts() + '.j')
+        if self._application_level:
+            jasmin_path = os.path.join(self._root, class_def.module.get_base_module_name(), class_def.to_jts() + '.j')
+            dump_root = os.path.join(self._root, class_def.module.get_base_module_name())
+        else:
+            jasmin_path = os.path.join(self._root, class_def.to_jts() + '.j')
+            dump_root = self._root
         if not os.path.isfile(jasmin_path):
             jd = JasminDumper(self._root, self._log)
             jd.dump_class(class_def)
-        sub = Popen(["java", "-jar", self._jasmin_path, "-d", self._root, jasmin_path], stdout=PIPE, stderr=PIPE, env=os.environ)
+        sub = Popen(["java", "-jar", self._jasmin_path, "-d", dump_root, jasmin_path], stdout=PIPE, stderr=PIPE, env=os.environ)
         jout, jerr = sub.communicate()
         print >> self._log, '\n'.join(filter(lambda x: x != '', [jout, jerr]))
         if jerr:

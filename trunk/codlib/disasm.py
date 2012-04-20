@@ -496,14 +496,17 @@ class Instruction(object):
                 
                 if ot is ClassDef:
                     char = 'C'
+                    base_module_name = op.module.siblings[0]
                 elif ot is RoutineDef:
                     char = 'M'
+                    base_module_name = op.module.siblings[0]
                 elif ot is FieldDef:
                     char = 'F'
+                    base_module_name = op.parent.module.siblings[0]
                 else:
                     raise ValueError("Invalid RefOperand type '%s' for instruction %r" % (ot, self))
                 
-                s_ops.append((char, op.to_jts()))
+                s_ops.append((char, (base_module_name, op.to_jts())))
             
             # Python knows how to pickle these suckers
             elif isinstance(op, LitOperand):

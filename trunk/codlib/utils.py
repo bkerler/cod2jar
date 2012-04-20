@@ -627,6 +627,7 @@ class TypeToken(object):
             self.type = resolver(self._class_id)
 
     def serialize(self):
+        # TODO: add module name/index for objects 
         return self.to_jts()
 
     def slots(self):
@@ -641,8 +642,8 @@ class TypeToken(object):
         return str(self)
 
     @staticmethod
-    def from_jts(jts, loader):
-        '''Parse a TypeToken from a Java Type String.'''
+    def from_jts(jts, module = None):
+        '''Parse a TypeToken from a Java Type String from the context of a given module.'''
         assert isinstance(jts, basestring), "JTS must be string!"
         tt = TypeToken(None)
 
@@ -659,7 +660,9 @@ class TypeToken(object):
         if _tchar == 'L':
             # Object type
             assert jts[-1] == ';', "JTS syntax error in '%s' (no trailing ';')" % jts
-            tt.type = loader.ref_class(jts[i+1:-1])
+            assert module, "No context module provided for JTS translation"
+            classpath = jts[i+1:-1]
+            tt.type = module.ref_class(classpath)
             tt.code = 7
             tt._object = True
         elif _tchar == '*':
@@ -758,12 +761,12 @@ class TypeList(list):
         return True
 
     @staticmethod
-    def from_jts(jts, loader):
-        '''Parse a concatenated list of JTS-formatted TypeTokens; return a TypeList.'''
+    def from_jts(jts, module):
+        '''Parse a concatenated list of JTS-formatted TypeTokens from the context of a given module; return a TypeList.'''
         jts_list = TypeList.split_jts(jts)
         tl = TypeList(None)
         for x in jts_list:
-            tl.append(TypeToken.from_jts(x, loader))
+            tl.append(TypeToken.from_jts(x, module))
         return tl
 
     @staticmethod

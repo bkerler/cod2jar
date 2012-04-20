@@ -30,6 +30,7 @@ his: Heuristic instruction scanner for RIM's JVM.
 import sys
 from utils import Primitive, TypeToken, TypeList
 from resolve import ClassDef, FieldDef, RoutineDef, LazyClassDef, LazyFieldDef, LazyRoutineDef
+from analysis import Subroutine
 import traceback, struct
 from itertools import combinations
 
@@ -146,7 +147,8 @@ class HILogger(object):
         self.log('-'*60)
         self.log("Subs scanned: %d" % self._stats['subs'])
         lbs = len(self._bad_subs)
-        self.log("Subs failed: %d (%.2f%%)" % (lbs, float(lbs) / self._stats['subs'] * 100))
+        if self._stats['subs']:
+            self.log("Subs failed: %d (%.2f%%)" % (lbs, float(lbs) / self._stats['subs'] * 100))
         self.log("Instructions scanned: %d" % self._stats['codes'])
         self.log("Fields patched up: %d" % self._stats['fields'])
         self.log("Virtual methods patched up: %d" % self._stats['virtuals'])
@@ -194,10 +196,15 @@ class HIScanner(object):
         'string[]': '[Ljava/lang/String;',
     }
     
-    def __init__(self, loader, log_file=sys.stderr, debug_level=0):
-        self._loader = loader
-        self._logfile = log_file
-        self._logger = HILogger(log_file)
+    def __init__(self, routine, hi_logger=None, debug_level=0):
+        self.routine = routine
+        self.sub = Subroutine(routine)
+        if hi_logger:
+            self._logfile = hi_logger._logfile
+            self._logger = hi_logger
+        else:
+            self._logfile = sys.stderr
+            self._logger = HILogger(self._logfile)
         self.debug_level = debug_level
         
         # Precompute some common types
@@ -211,14 +218,8 @@ class HIScanner(object):
     
     def count(self, kind):
         self._logger.count(kind)
-    
-    def dump_stats(self):
-        self._logger.dump_stats()
-    
-    def dump_bad_subs(self):
-        self._logger.dump_bad_subs()
 
-    def mktt(self, tname, dims=0, class_name=False):
+    def mktt(self, tname, dims=0, class_name=False, base_module_name=None):
         if isinstance(tname, TypeToken):
             # Clone type token
             tt = tname.clone()
@@ -240,14 +241,19 @@ class HIScanner(object):
                 tt._object = True
                 tt._array = False
                 tt.code = 7
-                tt.type = self._loader.ref_class(tname)
+                if base_module_name:
+                    # we know the modules this class lives in
+                    tt.type = self.routine.module._L.ref_class(base_module_name, tname)
+                else:
+                    # we need to find this class from our module's context
+                    tt.type = self.routine.module.ref_class(tname)
             elif tname == '?':
                 # Special null-object-ref wildcard (not just any type, any OBJECT type)
-                tt = TypeToken.from_jts('*', self._loader)
+                tt = TypeToken.from_jts('*')
                 tt._object = True
             else:
                 # Parse a fully-JTS-encoded type description
-                tt = TypeToken.from_jts(tname, self._loader)
+                tt = TypeToken.from_jts(tname, self.routine.module)
         elif isinstance(tname, (int, long)):
             # Ordinal [primitive] type code
             assert (tname in self.TYPE_ORDINAL), "Invalid RIM JVM type ordinal for mktt(): %d" % tname
@@ -399,9 +405,13 @@ class HIScanner(object):
         for why, p in bb.entry:
             # If we get here via an exception thrown, construct an appropriate stack
             if isinstance(why, basestring) and why and (why != 'default'):
-                if why == 'finally':
-                    why = 'java/lang/Throwable';
-                pstacks.append(TStack([self.mktt(why, class_name=True)]))
+                if why == 'finally' or why == 'java/lang/Throwable':
+                    why = 'java/lang/Throwable'
+                    base_module_name = 'net_rim_cldc'
+                    pstacks.append(TStack([self.mktt(why, class_name=True, base_module_name=base_module_name)]))
+                else:
+                    # otherwise we need to resolve the type from our module's context
+                    pstacks.append(TStack([self.mktt(why, class_name=True)]))
             elif p.tstack is not None:
                 # If this instruction came from a checkcastbranch* that failed, pop the top
                 if why is False and p.instructions[-1]._name.startswith('checkcastbranch'):
@@ -433,14 +443,12 @@ class HIScanner(object):
             tstack = TStack(self._merge_tlists(pstacks, no_fail = True))
         return tstack
 
-    def _calculate_starting_tlocals(self, bb, routine = None):
+    def _calculate_starting_tlocals(self, bb):
         ''' Calculates the starting locals of a basic blocks based on parent exit locals.
 
             Optionally provide a RoutineDef to use stack map information if available.
         '''
         plocals = self._get_starting_tlocals(bb)
-        if routine:
-            pass
         
         # Initialize locals, then try to eliminate wildcard types by finding more
         # explicit type info from other parent BBs' locals
@@ -450,20 +458,18 @@ class HIScanner(object):
             tlocals = self._merge_tlists(plocals, no_fail = True)
         return tlocals
 
-    def scan(self, sub, count=3, scanning_step_callback=None):
+    def scan(self, count=3, scanning_step_callback=None):
         ''' Compute type-on-top-of-stack values for the RIM-JVM instructions in an analysis.Subroutine.
         
             Blows away any previous .totos values for those instructions.
             Returns True if scan was successful, False otherwise.
         '''
-        self._logger.enter_sub(sub)
+        self._logger.enter_sub(self.sub)
         try:
-            routine = sub.routine
-
             # Find the initial basic block; mark it as having an empty initial typestack
             # (Also, blow away the tstack snapshots in each BB)
             bb = None
-            for b in sub.basic_blocks:
+            for b in self.sub.basic_blocks:
                 #self.log('DEBUG: %s exits: %s' % (str(b), str([(why, str(next)) for why, next in b.exit.iteritems()])))
                 # ending bb type information
                 b.tstack = None
@@ -476,7 +482,7 @@ class HIScanner(object):
                 if b.is_initial():
                     bb = b
             if bb is None:
-                raise AbortScanning("No initial BB found in %s" % routine)
+                raise AbortScanning("No initial BB found in %s" % self.routine)
             
             # Mark the basic blocks we've visited
             visited = set()
@@ -508,7 +514,7 @@ class HIScanner(object):
                     # Allocate 256 local slots to be safe; pre-populate first slots with parameter types
                     tlocals = [self._tt['*'] for i in xrange(256)]
                     i = 0
-                    for ptype in routine.param_types:
+                    for ptype in self.routine.param_types:
                         tlocals[i] = ptype
                         if ptype.slots() == 2:
                             tlocals[i+1] = ptype
@@ -520,7 +526,7 @@ class HIScanner(object):
                 else:
                     # Otherwise, compute our starting stack/local lists.
                     tstack = self._calculate_starting_tstack(bb)
-                    tlocals = self._calculate_starting_tlocals(bb, routine = routine)
+                    tlocals = self._calculate_starting_tlocals(bb)
                     
                     # track starting type info so if we encounter this block later,
                     # we can compare to see if we have better info
@@ -533,7 +539,7 @@ class HIScanner(object):
                 
                 # visualize this step of the scan
                 if scanning_step_callback:
-                    scanning_step_callback(sub, bb, candidates, visited, failed)
+                    scanning_step_callback(self.sub, bb, candidates, visited, failed)
                 try:
                     # Walk the instructions in the BB, tracking the scanned stack
                     for i, instr in enumerate(bb.instructions):
@@ -631,14 +637,14 @@ class HIScanner(object):
             if count:
                 count -= 1
                 self.log('WARNING: Attempting rescan (%d tries left)' % count)
-                return self.scan(sub, count, scanning_step_callback)
+                return self.scan(count, scanning_step_callback)
             else:
-                self._logger.error_sub(sub, err)
+                self._logger.error_sub(self.sub, err)
                 return False
         # visualize the final step of scanning
         if scanning_step_callback:
-            scanning_step_callback(sub, None, candidates, visited, failed)
-        self._logger.exit_sub(sub)
+            scanning_step_callback(self.sub, None, candidates, visited, failed)
+        self._logger.exit_sub(self.sub)
         return True
     
     # Many instructions can be heuristically scanned using the
@@ -1000,18 +1006,15 @@ class HIScanner(object):
             args = tstack.pop(instr.operands[1])
             this = None
             if args[0]._array:
-                this = self._loader.ref_class('java/lang/Object')
+                this = self.sub.routine.module._L.ref_class('net_rim_cldc', 'java/lang/Object')
             elif args[0]._object:
                 this = args[0].type
-                # we need to actualize this to get the virtual function table
-                this.resolve().actualize()
+            # we need to actualize this to get the virtual function table
+            this.resolve().actualize()
 
             if (this is None) or (not hasattr(this, 'vft')) or (len(this.vft) <= instr.operands[0]):
                 # No idea what should go here
                 raise VirtualPatchFailed("virtual method call (%r) on unhelpful stack type (%s)" % (instr, args[0]))
-            
-            # Make sure it has been actualized
-            this.actualize()
             
             try:
                 vmindex = instr.operands[0]

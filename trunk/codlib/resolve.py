@@ -46,9 +46,10 @@ MODE_FLAGS = ['static', 'abstract']
 # Helpers
 #----------------------------------------------------------
 class LazyLoader(object):
-    __slots__ = ['_lazy_name', '_lazy_loader', '_lazy_ref']
+    __slots__ = ['_lazy_module_name', '_lazy_name', '_lazy_loader', '_lazy_ref']
 
-    def __init__(self, name, loader):
+    def __init__(self, module_name, name, loader):
+        self._lazy_module_name = module_name
         self._lazy_name = name
         self._lazy_loader = loader
         self._lazy_ref = None
@@ -58,10 +59,13 @@ class LazyLoader(object):
 
     def __str__(self):
         ref = object.__getattribute__(self, '_lazy_ref')
-        if ref is None:
-            return object.__getattribute__(self, '_lazy_name')
-        else:
-            return str(ref)
+        try:
+            if ref is None:
+                ref = object.__getattribute__(self, '_lazy_load')()
+        except AttributeError:
+            pass
+        #return object.__getattribute__(self, '_lazy_name')
+        return str(ref)
 
     def __repr__(self):
         ref = object.__getattribute__(self, '_lazy_ref')
@@ -87,6 +91,7 @@ class LazyModule(LazyLoader):
 
             # These are no longer needed here
             del self._lazy_loader
+            del self._lazy_module_name
             del self._lazy_name
         return ref
 
@@ -96,13 +101,34 @@ class LazyClassDef(LazyLoader):
         if ref is None:
             # Get the loader object and the [JTS] name of the class to load
             loader = object.__getattribute__(self, "_lazy_loader")
-            class_path = object.__getattribute__(self, "_lazy_name")
+            base_module_name = object.__getattribute__(self, "_lazy_module_name")
+            classpath = object.__getattribute__(self, "_lazy_name")
 
             # Load and set our internal reference
-            ref = self._lazy_ref = loader.load_class(class_path)
+            ref = self._lazy_ref = loader.load_class(base_module_name, classpath)
 
             # These are no longer needed here
             del self._lazy_loader
+            del self._lazy_module_name
+            del self._lazy_name
+        return ref
+
+class LazyClassDefFromContext(LazyLoader):
+    def _lazy_load(self):
+        ref = object.__getattribute__(self, '_lazy_ref')
+        if ref is None:
+            # Get the loader object and the [JTS] name of the class to load
+            loader = object.__getattribute__(self, "_lazy_loader")
+            module_name = object.__getattribute__(self, "_lazy_module_name")
+            classpath = object.__getattribute__(self, "_lazy_name")
+
+            # Load and set our internal reference
+            mod = loader.load_module(module_name)
+            ref = self._lazy_ref = mod.load_class(classpath)
+
+            # These are no longer needed here
+            del self._lazy_loader
+            del self._lazy_module_name
             del self._lazy_name
         return ref
 
@@ -112,13 +138,15 @@ class LazyRoutineDef(LazyLoader):
         if ref is None:
             # Get the loader object and the JTS name/params/return of method to get
             loader = object.__getattribute__(self, "_lazy_loader")
+            base_module_name = object.__getattribute__(self, "_lazy_module_name")
             method_signature = object.__getattribute__(self, "_lazy_name")
 
             # Load and set our internal reference
-            ref = self._lazy_ref = loader.get_method(method_signature)
+            ref = self._lazy_ref = loader.get_method(base_module_name, method_signature)
 
             # These are no longer needed here
             del self._lazy_loader
+            del self._lazy_module_name
             del self._lazy_name
         return ref
 
@@ -128,13 +156,15 @@ class LazyFieldDef(LazyLoader):
         if ref is None:
             # Get the loader object and the JTS name of field to get
             loader = object.__getattribute__(self, "_lazy_loader")
+            base_module_name = object.__getattribute__(self, "_lazy_module_name")
             field_path = object.__getattribute__(self, "_lazy_name")
 
             # Load and set our internal reference
-            ref = self._lazy_ref = loader.get_field(field_path)
+            ref = self._lazy_ref = loader.get_field(base_module_name, field_path)
 
             # These are no longer needed here
             del self._lazy_loader
+            del self._lazy_module_name
             del self._lazy_name
         return ref
 
@@ -156,8 +186,12 @@ class Loader(object):
         self.search_path = search_path
         self.auto_resolve = auto_resolve
         self._log = log_file
+        # dict of [module_name]
         self._modules = {}
-        self._classes = {None: None, 'None': None}
+        # dict of [base_module_name][classpath]
+        self._classes = {}
+        # dict of module_name -> base_module_name
+        self._base_module_map = {}
 
         self.cache_root = None
         self._init_cache_root(cache_root)
@@ -185,7 +219,6 @@ class Loader(object):
                     # also give it the file name just in case it is different
                     # this could lead to bad times if we mistakenly name a cod
                     self._module_path_map[filename[:-4]] = cod_path
-                    
 
     def _init_module_cache_map(self):
         if self.cache_root is not None:
@@ -212,6 +245,19 @@ class Loader(object):
         else:
             self.cache_root = cache_root
 
+    def _can_unpickle(self, rel_path):
+        if self.cache_root is None:
+            raise Exception("No cache is available")
+        elif isinstance(self.cache_root, zipfile.ZipFile):
+            try:
+                self.cache_root.getinfo(rel_path)
+                return True
+            except KeyError:
+                return False
+        else:
+            disk_path = os.path.join(self.cache_root, rel_path)
+            return os.path.isfile(disk_path)
+
     def _unpickle(self, rel_path):
         if self.cache_root is None:
             raise Exception("No cache is available")
@@ -228,12 +274,12 @@ class Loader(object):
         X.name, X.value = export
         return X
 
-    def _ds_entry_point(self, entry_point):
+    def _ds_entry_point(self, entry_point, module):
         '''Deserialize an EntryPoint from a depickled blob.'''
         EP = EntryPoint(None, None)
         if entry_point:
             EP.name = entry_point[0]
-            EP.param_types = self._ds_type_list(entry_point[1])
+            EP.param_types = self._ds_type_list(entry_point[1], module)
             EP.offset = entry_point[2]
             EP.empty = False
         else:
@@ -252,7 +298,7 @@ class Loader(object):
         '''Deserialize a module from disk cache.'''
         # Open/unpickle it
         try:
-            M = self._unpickle(name +  ".cod.db")
+            M = self._unpickle(name + ".cod.db")
         except Exception as ex:
             self.log("Unable to load module '%s' from cache: %s (%s)" % (name, ex, type(ex)))
             return None
@@ -262,16 +308,19 @@ class Loader(object):
         mod._R = None
         mod._L = self
         mod._resolved = mod._actualized = mod._disasmed = True
-        self._modules[name] = mod
 
         mod.name, mod.version, mod.timestamp = M['name'], M['version'], M['timestamp']
         mod.attrs = dict((a, a) for a in M['attrs'])
         mod.siblings = M['siblings']
         mod.aliases = M['aliases']
+        self._modules[mod.name] = mod
         for alias in mod.aliases:
             self._modules[alias] = mod
+            self._base_module_map[alias] = mod.get_base_module_name()
+        self._base_module_map[mod.name] = mod.get_base_module_name()
+        for sibling in mod.siblings:
+            self._base_module_map[sibling] = mod.get_base_module_name()
         mod.exports = [self._ds_export(X) for X in M['exports']]
-        mod.entry_points = [self._ds_entry_point(EP) for EP in M['entry_points']]
         mod.statics = M['statics']
         mod.signatures = [self._ds_signature(S) for S in M['signatures']]
 
@@ -280,11 +329,14 @@ class Loader(object):
         mod.import_versions = M['import_versions']
 
         # Create lazy references to its classes
-        mod.classes = map(self.ref_class, M['classes'])
+        mod.classes = [self.ref_class(mod.get_base_module_name(), cl) for cl in M['classes']]
 
         # And to its routines
-        mod.routines = [self.ref_method(jts) for offset, jts in M['routines']]
+        mod.routines = [self.ref_method(mod.get_base_module_name(), jts) for offset, jts in M['routines']]
         mod._routine_map = dict((M['routines'][i][0], mod.routines[i]) for i in xrange(len(M['routines'])))
+
+        # finally the entry point
+        mod.entry_points = [self._ds_entry_point(EP, mod) for EP in M['entry_points']]
 
         # Make the rest of the module's fields empty (we didn't repopulate them)
         mod.iface_mrefs = mod.class_refs = \
@@ -303,7 +355,7 @@ class Loader(object):
             return self._modules[name]
         except KeyError:
             # Otherwise, return a lazy-loading reference to the module
-            return LazyModule(name, self)
+            return LazyModule(name, name, self)
 
     def load_codfile(self, filename):
         '''Load a module from an explicitly-named COD file.'''
@@ -328,6 +380,10 @@ class Loader(object):
         self._modules[mod.name] = mod
         for alias in mod.aliases:
             self._modules[alias] = mod
+            self._base_module_map[alias] = mod.get_base_module_name()
+        self._base_module_map[mod.name] = mod.get_base_module_name()
+        for sibling in mod.siblings:
+            self._base_module_map[sibling] = mod.get_base_module_name()
 
         return mod
 
@@ -350,11 +406,19 @@ class Loader(object):
         return False
         
     def unload_module(self, name):
-        '''Unload a module from the memory cache'''
+        '''Unload a module and its classes from the memory cache'''
         name = os.path.splitext(os.path.basename(name))[0]
         if name in self._modules:
             for alias in self._modules[name].aliases:
+                try:
+                    del self._classes[alias]
+                except KeyError:
+                    pass
                 del self._modules[alias]
+            try:
+                del self._classes[name]
+            except KeyError:
+                pass
             del self._modules[name]
 
     def load_module(self, name):
@@ -363,85 +427,107 @@ class Loader(object):
         # tries to load a similarly-named module from cache), but it doesn't give full control...
         name = os.path.splitext(os.path.basename(name))[0]
 
+        # TODO: remove
+        '''
+        if name not in self._modules:
+            import traceback
+            from StringIO import StringIO
+            dump = StringIO()
+            traceback.print_stack(file=dump)
+            dump.seek(0)
+            dump = dump.read()
+            self.log('Loading module %s' % name)
+            self.log(dump)
+        '''
+        
         try:
             # Try loading from memory cache...
             return self._modules[name]
         except KeyError:
-            # Not in memory cache; must load from somewhere
-            mod = None
-            
-            # Use disk cache (we must have a cache_root)
-            if self.cache_root is not None:
-                if name in self._module_cache_map:
-                    if self._module_cache_map[name] != name:
-                        self.log("Loading module '%s' as '%s' from disk cache" % (self._module_cache_map[name], name))
-                    else:
-                        self.log("Loading module '%s' from disk cache" % name)
-                    mod = self._ds_module(self._module_cache_map[name]) # This method also sticks the module into our memory cache
+            pass
 
-            # Failing that (if mod is still None), try loading from the original COD file
-            if mod is None:
-                if name in self._module_path_map:
-                    if self._module_path_map[name] != name:
-                        self.log("Loading module '%s' as '%s' from COD" % (self._module_path_map[name], name))
-                    else:
-                        self.log("Loading module '%s' from COD" % name)
-                    cf = utils.load_cod_file(self._module_path_map[name], self.search_path)
-                    mod = Module(self, cf)
+        # Not in memory cache; must load from somewhere
+        mod = None
+        
+        # Use disk cache (we must have a cache_root)
+        if self.cache_root is not None:
+            if name in self._module_cache_map:
+                filename = os.path.split(self._module_cache_map[name])[-1]
+                if filename != name + '.cod':
+                    self.log("Loading module '%s' as '%s' from disk cache" % (self._module_cache_map[name], name))
+                else:
+                    self.log("Loading module '%s' from disk cache" % name)
+                mod = self._ds_module(self._module_cache_map[name]) # This method also sticks the module into our memory cache
 
-                    # Stick this module in memory cache
-                    self._modules[mod.name] = mod
-                    for alias in mod.aliases:
-                        self._modules[alias] = mod
+        # Failing that (if mod is still None), try loading from the original COD file
+        if mod is None:
+            if name in self._module_path_map:
+                filename = os.path.split(self._module_path_map[name])[-1]
+                if filename != name + '.cod':
+                    self.log("Loading module '%s' as '%s' from COD" % (self._module_path_map[name], name))
+                else:
+                    self.log("Loading module '%s' from COD" % name)
+
+                cf = utils.load_cod_file(self._module_path_map[name], self.search_path)
+                mod = Module(self, cf)
+
+                # Stick this module in memory cache
+                self._modules[mod.name] = mod
+                for alias in mod.aliases:
+                    self._modules[alias] = mod
+                    self._base_module_map[alias] = mod.get_base_module_name()
+                self._base_module_map[mod.name] = mod.get_base_module_name()
+                for sibling in mod.siblings:
+                    self._base_module_map[sibling] = mod.get_base_module_name()
+
+                # Resolve the module's external references AFTER it has been added to the loader's registry...
+                if self.auto_resolve:
+                    mod.resolve()
                     
-                    # Resolve the module's external references AFTER it has been added to the loader's registry...
-                    if self.auto_resolve:
-                        mod.resolve()
-                        
-            if mod is None:
-                raise(LoadError("Could not load module %s from cache or search path" % name))
-            return mod
+        if mod is None:
+            raise(LoadError("Could not load module %s from cache or search path" % name))
+        return mod
 
-    def _ds_type_token(self, type_token):
-        '''Deserialize a TypeToken from a depickled Java Type String.'''
-        return utils.TypeToken.from_jts(type_token, self)
+    def _ds_type_token(self, type_token, module):
+        '''Deserialize a TypeToken from a depickled Java Type String from the context of module.'''
+        return utils.TypeToken.from_jts(type_token, module)
 
-    def _ds_type_list(self, type_list):
-        '''Deserialize a TypeList from a depickled Java Type String.'''
-        return utils.TypeList.from_jts(type_list, self)
+    def _ds_type_list(self, type_list, module):
+        '''Deserialize a TypeList from a depickled Java Type String from the context of module.'''
+        return utils.TypeList.from_jts(type_list, module)
 
     def _ds_field(self, parent, field_data):
         '''Deserialize a FieldDef from a depickled blob.'''
         fd = FieldDef(None, None, None)
         fd.parent = parent
         fd.name = field_data[2]
-        fd.type = self._ds_type_list(field_data[1])
+        fd.type = self._ds_type_list(field_data[1], fd.parent.module)
         fd.attrs = dict((a, a) for a in field_data[0])
         fd.address = None if (len(field_data) == 3) else field_data[3]
         return fd
 
-    def _ds_sme(self, stack_map_entry):
-        '''Deserialize a StackMapEntry from a depickled blob.'''
+    def _ds_sme(self, stack_map_entry, module):
+        '''Deserialize a StackMapEntry from a depickled blob from the context of module.'''
         sme = StackMapEntry(None, None, None)
         sme.label = stack_map_entry[0]
-        sme.type = self._ds_type_list(stack_map_entry[1])
+        sme.type = self._ds_type_list(stack_map_entry[1], module)
         return sme
 
-    def _ds_jts_ref(self, rtype, jts):
+    def _ds_jts_ref(self, base_module_name, rtype, jts):
         try:
             if rtype == 'C':
-                return self.ref_class(jts)
+                return self.ref_class(base_module_name, jts)
             elif rtype == 'M':
-                return self.ref_method(jts)
+                return self.ref_method(base_module_name, jts)
             elif rtype == 'F':
-                return self.ref_field(jts)
+                return self.ref_field(base_module_name, jts)
             else:
-                raise ValueError("Invalid JTS reference type char '%s' (jts: '%s')" % (rtype, jts))
+                raise ValueError("Invalid JTS reference type char '%s' (jts: '%s') in sibling of module %s" % (rtype, jts, base_module_name))
         except AssertionError as err:
-            self.log("ERROR: malformed JTS reference (%s, %s)" % (rtype, jts))
+            self.log("ERROR: malformed JTS reference (%s, %s) in sibling of module %s" % (rtype, jts, base_module_name))
             raise
 
-    def _ds_instruction(self, in_data):
+    def _ds_instruction(self, in_data, module):
         '''Deserialize an Instruction from a depickled blob.'''
         inst = disasm.Instruction(None, None, None, None)
 
@@ -451,7 +537,7 @@ class Loader(object):
             inst.offset, inst.opcode, ops, inst.totos = in_data[0], in_data[1], [], in_data[2]
 
         inst._name = disasm._OPCODES[inst.opcode]
-        inst.totos = self._ds_type_token(inst.totos) if (inst.totos is not None) else None
+        inst.totos = self._ds_type_token(inst.totos, module) if (inst.totos is not None) else None
 
         inst.operands = []
         for op in ops:
@@ -459,17 +545,19 @@ class Loader(object):
             if otype == 'L':
                 inst.operands.append(oval)
             elif otype == 'T':
-                inst.operands.append(utils.TypeToken.from_jts(oval, self))
+                inst.operands.append(utils.TypeToken.from_jts(oval, module))
             else:
-                inst.operands.append(self._ds_jts_ref(otype, oval))
+                base_module_name, oval = oval
+                inst.operands.append(self._ds_jts_ref(base_module_name, otype, oval))
 
         return inst
 
     def _ds_handler(self, xh_data):
         xh = ExHandler(None, None, None)
-        xh.type = self.ref_class(xh_data[0])
-        xh.scope = xh_data[1]
-        xh.target = xh_data[2]
+        base_module_name = xh_data[1]
+        xh.type = self.ref_class(base_module_name, xh_data[0])
+        xh.scope = xh_data[2]
+        xh.target = xh_data[3]
         return xh
 
     def _ds_method(self, parent, method_data):
@@ -484,26 +572,25 @@ class Loader(object):
         rd.attrs = dict((a, a) for a in method_data['attrs'])
 
         # Type info
-        rd.return_type = self._ds_type_list(method_data['return_type'])
-        rd.param_types = self._ds_type_list(method_data['param_types'])
-        rd.stack_map = map(self._ds_sme, method_data['stack_map'])
+        rd.return_type = self._ds_type_list(method_data['return_type'], parent.module)
+        rd.param_types = self._ds_type_list(method_data['param_types'], parent.module)
+        rd.stack_map = [self._ds_sme(x, parent.module) for x in method_data['stack_map']]
 
         # Instructions/exception handlers
-        rd.instructions = map(self._ds_instruction, method_data['instructions'])
+        rd.instructions = [self._ds_instruction(instr, parent.module) for instr in method_data['instructions']]
         rd.handlers = map(self._ds_handler, method_data['handlers'])
 
         # All ready to go!
         rd._disasmed = rd._resolved = True
         return rd
 
-    def _ds_class(self, name):
+    def _ds_class(self, base_module_name, name):
         '''Deserialize a ClassDef from a depickled blob.'''
-        class_path = name + ".cache"
-
+        cache_path = "%s/%s" % (base_module_name, name + ".cache")
         try:
-            C = self._unpickle(class_path)
+            C = self._unpickle(cache_path)
         except Exception as ex:
-            self.log("Unable to load cached class from '%s': %s (%s)" % (class_path, ex, type(ex)))
+            self.log("Unable to load cached class from '%s': %s (%s)" % (cache_path, ex, type(ex)))
             return None
 
         # Create an empty class def object (cache a reference to it)
@@ -520,8 +607,8 @@ class Loader(object):
         cd.attrs = dict((a, a) for a in C['attrs'])
 
         # Populate simple type-based fields
-        cd.superclass = self.ref_class(C['superclass'])
-        cd.ifaces = map(self.ref_class, C['ifaces'])
+        cd.superclass = self.ref_class(C['superclass_module'], C['superclass'])
+        cd.ifaces = [self.ref_class(C['ifaces_modules'][i], C['ifaces'][i]) for i in range(len(C['ifaces']))]
 
         # Populate field/method lists
         cd.fields = [self._ds_field(cd, F) for F in C['fields']]
@@ -535,8 +622,8 @@ class Loader(object):
         cd._static_address_map = dict((sf.address, sf) for sf in cd.static_fields)
 
         # Populate VFT and FFT (i.e., re-actualize)
-        cd.vft = [self._ds_jts_ref('M', vm_jts) for vm_jts in C['vft']]
-        cd.fft = [self._ds_jts_ref('F', f_jts) for f_jts in C['fft']]
+        cd.vft = [self._ds_jts_ref(C['vft_modules'][i], 'M', C['vft'][i]) for i in range(len(C['vft']))]
+        cd.fft = [self._ds_jts_ref(C['fft_modules'][i], 'F', C['fft'][i]) for i in range(len(C['fft']))]
         cd._actualized = True
 
         # Make sure this class ends up in the memory cache
@@ -545,67 +632,187 @@ class Loader(object):
         # Return that sucker
         return cd
 
-    def ref_class(self, name):
-        '''Return a lazy-loading ClassDef matching the given [dotted] class name.'''
+    def find_class_in_dependencies(self, module, classpath, preferred_mod_index = 0):
+        ''' Return a the base module name containing a named class.
+            The base module name is the first listed sibling in every COD.
+            For example, the base module name of net_rim_cldc-16 is
+            net_rim_cldc.
+        '''
+        # this function is an evil necessity because we don't fully
+        # understand the mod_index in ClassRefs
+        if module._resolved:
+            dependencies = [module.name,] + [x.name for x in module.imports]
+        else:
+            dependencies = [module.name,] + module.raw_imports
+
+        # make the common case FAST
+        if preferred_mod_index:
+            preferred_mod_name = dependencies.pop(preferred_mod_index - 1)
+            dependencies.insert(0, preferred_mod_name)
+
+        # go through loaded modules and locate this class symbolically
+        visited = set()
+        for mod_name in dependencies:
+            if mod_name not in self._base_module_map:
+                visited.add(mod_name)
+                self.load_module(mod_name)
+            base_module_name = self._base_module_map[mod_name]
+            if base_module_name in self._classes:
+                if classpath in self._classes[base_module_name]:
+                    return base_module_name
+            if self.cache_root:
+                cache_path = "%s/%s" % (base_module_name, classpath + ".cache")
+                if self._can_unpickle(cache_path):
+                    return base_module_name
+
+        # soooooo sloowwwwwwww
+        # otherwise try to start loading modules to look
+        for mod_name in dependencies:
+            if mod_name not in visited:
+                visited.add(mod_name)
+                mod = self.load_module(mod_name)
+                base_module_name = self._base_module_map[mod_name]
+                if classpath in self._classes[base_module_name]:
+                    return base_module_name
+    
+        # otherwise, desperately grab at siblings of dependencies
+        # we really need to get rid of this
+        for mod_name in dependencies:
+            mod = self.load_module(mod_name)
+            for sibling in mod.siblings:
+                if sibling not in visited:
+                    visited.add(sibling)
+                    sibling_mod = self.load_module(sibling)
+                    base_module_name = self._base_module_map[mod_name]
+                    if classpath in self._classes[base_module_name]:
+                        return base_module_name
+
+        # what the?!
+        with open("classdump.txt", 'wt') as fd:
+            for mname in self._classes:
+                for cname in self._classes[mname]:
+                    if cname not in [None, 'None']:
+                        print >> fd, mname, cname
+        raise(LoadError("Could not locate class '%s' from module dependencies of %s" % (classpath, module.name)))
+   
+    def ref_class(self, base_module_name, name):
+        ''' Return a lazy-loading ClassDef matching the given [dotted] class name.
+            A class of "name" must exist in a sibling of "base_module_name".
+        '''
+        if not name:
+            return None
         try:
             # If it's already loaded, return a straight reference
-            return self._classes[name]
+            return self._classes[base_module_name][name]
         except KeyError:
-            return LazyClassDef(name, self)
+            return LazyClassDef(base_module_name, name, self)
+   
+    def ref_class_from_context(self, module, name):
+        ''' Return a lazy-loading ClassDef matching the given [dotted] class name
+            from the context of a specific module.
+            A class of "name" must exist in "module" or an import of "module".
+        '''
+        if not name:
+            return None
+        # If it's already loaded, return a straight reference
+        if module._resolved:
+            module_names = [x.name for x in module.imports]
+        else:
+            module_names = module.raw_imports
+        module_names = [module.name,] + module_names
 
+        # go through and locate this class symbolically
+        for mod_name in module_names:
+            if mod_name in self._modules:
+                base_module_name = self._base_module_map[mod_name]
+                if base_module_name in self._classes:
+                    if name in self._classes[base_module_name]:
+                        return self._classes[base_module_name][name]
 
-    def load_class(self, full_name):
-        '''Return a reference to a ClassDef instance matching the given [JTS] class name.'''
+        # otherwise return a lazy reference
+        return LazyClassDefFromContext(module.name, name, self)
+
+    def load_class(self, base_module_name, full_name):
+        '''Return a reference to a ClassDef instance matching the given [JTS] class name in a named module.'''
+        if not full_name:
+            return None
         try:
             # If we've loaded this class, return it
-            return self._classes[full_name]
+            return self._classes[base_module_name][full_name]
         except KeyError:
             # We may be able to load it from disk cache
             cdef = None
 
             if self.cache_root is not None:
-                # If we have a disk cache, try loading it from that
-                self.log("Loading class '%s' from disk cache" % full_name)
-                cdef = self._ds_class(full_name)
+                classpath = '%s/%s' % (base_module_name, full_name + '.cache')
+                if self._can_unpickle(classpath):
+                    # If we have a disk cache, try loading it from that
+                    self.log("Loading class '%s' from disk cache" % full_name)
+                    cdef = self._ds_class(base_module_name, full_name)
+            
+            # start loading the base module and siblings
+            if cdef is None:
+                # start loading sibling modules until we find it...
+                mod = self.load_module(base_module_name)
+                try:
+                    return self._classes[base_module_name][full_name]
+                except KeyError:
+                    pass
+                for sibling in mod.siblings[1:]:
+                    # if we haven't loaded it...
+                    if sibling not in self._modules:
+                        # ...load it
+                        sibling_mod = self.load_module(sibling)
+                        try:
+                            cdef = self._classes[base_module_name][full_name]
+                        except KeyError:
+                            pass
 
             if cdef is None:
                 # Um...  We're out of luck here...
                 with open("classdump.txt", 'wt') as fd:
-                    for cname in self._classes:
-                        print >> fd, cname
-                raise LoadError("Unable to load class '%s'!" % full_name)
+                    for mname in self._classes:
+                        for cname in self._classes[mname]:
+                            if cname not in [None, 'None']:
+                                print >> fd, mname, cname
+                raise LoadError("Unable to load class '%s' in sibling of module %s!" % (full_name, base_module_name))
 
             return cdef
 
-    def ref_method(self, method_signature):
+    def ref_method(self, base_module_name, method_signature):
         '''Get a lazy-loader for a RoutineDef matching the given JTS signature.'''
-        return LazyRoutineDef(method_signature, self)
+        return LazyRoutineDef(base_module_name, method_signature, self)
 
-    def get_method(self, method_signature):
+    def get_method(self, base_module_name, method_signature):
         '''Get a reference to a RoutineDef object matching the given JTS signature.'''
         method_name, rest = method_signature.split('(', 1)
         class_name, method_name = method_name.rsplit('/', 1)
         param_types, rest = rest.split(')', 1)
 
-        param_types = self._ds_type_list(param_types)
-        C = self.load_class(class_name)
+        C = self.load_class(base_module_name, class_name)
+        param_types = self._ds_type_list(param_types, C.module)
         return C.get_member_by_name(method_name, param_types)
 
-    def ref_field(self, field_path):
+    def ref_field(self, base_module_name, field_path):
         '''Get a lazy-loader for a FieldDef matching the given JTS name.'''
-        return LazyFieldDef(field_path, self)
+        return LazyFieldDef(base_module_name, field_path, self)
 
-    def get_field(self, field_path):
+    def get_field(self, base_module_name, field_path):
         '''Get a reference to a FieldDef matching the given JTS name.'''
         class_name, field_name = field_path.rsplit('/', 1)
-        C = self.load_class(class_name)
+        C = self.load_class(base_module_name, class_name)
         return C.get_member_by_name(field_name, None, True)
 
     def add_class_def(self, class_def):
+        base_module_name = class_def.module.get_base_module_name()
         name = class_def.name
-        if name in self._classes:
-            self.log("WARNING: redefinition of class '%s' by module '%s' (already defined in module '%s')" % (name, class_def.module, self._classes[name].module))
-        self._classes[name] = class_def
+        if base_module_name in self._classes:
+            if name in self._classes[base_module_name]:
+                self.log("WARNING: redefinition of class '%s' by module '%s' (already defined in sibling of module '%s')" % (name, class_def.module, self._classes[base_module_name][name].module))
+        if base_module_name not in self._classes:
+            self._classes[base_module_name] = {None: None, 'None': None}
+        #print 'Registering %s => %s of class from %s' % (base_module_name, name, class_def.module.name)
+        self._classes[base_module_name][name] = class_def
 
     def add_new_search_path(self, new_path):
         self.search_path.append(new_path)
@@ -652,7 +859,7 @@ class Loader(object):
     def get_field_renaming_db(self):
         return self.field_name_db
 
-    def rename_routine(self, routine_name, new):
+    def rename_routine(self, base_module_name, routine_name, new):
         found_name = routine_name
         for accessor_name, name in self.routine_name_db.iteritems():
             #print '/'.join(accessor_name.split('(')[0].split('/')[:-1]) + '/' + name + '(' + accessor_name.split('(')[1]
@@ -662,14 +869,14 @@ class Loader(object):
 
         # verify that it is a routine
         class_name = '/'.join(routine_name.split('(')[0].split('/')[:-1])
-        class_def = self.load_class(class_name)
+        class_def = self.load_class(base_module_name, class_name)
         if routine_name not in [x.to_jts() for x in class_def.routines]:
             raise LoadError("Could not locate routine %s for renaming" % routine_name)
 
         self.routine_name_db[found_name] = new
         self.save_name_db()
 
-    def rename_field(self, field_name, new):
+    def rename_field(self, base_module_name, field_name, new):
         found_name = field_name
         for accessor_name, name in self.field_name_db.iteritems():
             #print '/'.join(accessor_name.split('/')[:-1]) + '/' + name
@@ -679,7 +886,7 @@ class Loader(object):
 
         # verify that it is a field
         class_name = '/'.join(field_name.split('(')[0].split('/')[:-1])
-        class_def = self.load_class(class_name)
+        class_def = self.load_class(base_module_name, class_name)
         if field_name not in [x.to_jts() for x in class_def.fields+class_def.static_fields]:
             raise LoadError("Could not locate field %s for renaming" % field_name)
 
@@ -750,7 +957,7 @@ class Resolver(object):
         except KeyError:
             if offset == 0xFFFF:
                 # this is an empty type list
-                x = utils.TypeList.from_jts("", self._M._L)
+                x = utils.TypeList.from_jts("", self._M)
             else:
                 x = utils.TypeList(self._db.seek(offset))
             self._cache['tlists'][offset] = x
@@ -762,7 +969,7 @@ class Resolver(object):
         if isinstance(class_, basestring):
             # Special case--if we need to resolve a type by name, try to use our module's loader
             try:
-                return M._L.load_class(class_)
+                return M.load_class(class_)
             except LoadError as err:
                 # Hacky error return (since all our Unresolved/Bad class ref types expect a class-ref tuple)
                 urc = utils.UnresolvedClass((-1, -1))
@@ -863,6 +1070,8 @@ class Module(object):
         # Other module-wide stuff
         self.siblings = map(R.get_escaped_lit, ds.siblings)
         self.aliases = map(R.get_escaped_lit, ds.aliases)
+        self.raw_imports = [R.get_escaped_lit(n) for n, v in ds.modules[1:]]
+        self.raw_import_versions = [R.get_escaped_lit(v) for n, v in ds.modules[1:]]
         self.exports = [ExportedItem(self, off) for off in ds.exports]
         self.statics = [(sd.address, sd.value) for sd in ds.static_data] # Not sure what these are yet...
 
@@ -903,8 +1112,22 @@ class Module(object):
 
         self._resolved = self._actualized = self._disasmed = False
 
+    def get_base_module_name(self):
+        return self.siblings[0]
+
     def get_class_resolver(self):
         return self._R.get_class
+
+    def ref_class(self, classpath):
+        ''' Return a lazy-loading ClassDef matching the given [dotted] class name
+            from the context of this module.
+        '''
+        return self._L.ref_class_from_context(self, classpath)
+
+    def load_class(self, classpath, preferred_mod_index = 0):
+        '''Symbolically locates a class from the context of this module.'''
+        base_module_name = self._L.find_class_in_dependencies(self, classpath, preferred_mod_index=preferred_mod_index)
+        return self._L.load_class(base_module_name, classpath)
 
     def resolve(self):
         '''Resolve imports and external dependencies.'''
@@ -912,6 +1135,17 @@ class Module(object):
         self._resolved = True
         ds, R = self._cf.data, self._R
         self._L.log("Resolving module '%s'" % self.name)
+
+        # TODO: remove
+        '''
+        import traceback
+        from StringIO import StringIO
+        dump = StringIO()
+        traceback.print_stack(file=dump)
+        dump.seek(0)
+        dump = dump.read()
+        self._L.log(dump)
+        '''
 
         # Load our siblings (this accounts for slight version differences
         # where a class moved to a different sibling)
@@ -926,9 +1160,8 @@ class Module(object):
             m.resolve()
 
         # Load our imported modules
-        _imports = [(R.get_escaped_lit(n), R.get_escaped_lit(v)) for n, v in ds.modules[1:]]
-        self.imports = [self._L.load_module(n) for n, v in _imports]
-        self.import_versions = [v for n, v in _imports]
+        self.imports = [self._L.load_module(n) for n in self.raw_imports]
+        self.import_versions = [v for v in self.raw_import_versions]
 
         # Ensure our imports have been resolved
         for m in self.imports: m.resolve()
@@ -1186,10 +1419,10 @@ class FixupClassRef(Fixup):
 
     def resolve(self, resolver):
         if self.item is None:
-                _class = self.class_.get_class()
-                self.item = _class
+            _class = self.class_.get_class()
+            self.item = _class
         else:
-                _class = self.item
+            _class = self.item
         return _class
 
     def __str__(self):
@@ -1628,7 +1861,12 @@ class ExHandler(object):
         return "<xh: '%s'>" % str(self)
 
     def serialize(self):
-        return (str(self.type) if self.type is not None else None, self.scope, self.target)
+        return (
+            str(self.type) if self.type is not None else None,
+            self.type.module.get_base_module_name() if self.type is not None else None,
+            self.scope,
+            self.target
+        )
 
 class ClassDef(object):
 
@@ -1834,8 +2072,8 @@ class ClassDef(object):
                     print '    Iface:',
                     print [x.type.ifaces for x in m_type][1]
                     print m_type.is_super_or_implements_or_equivalent(c.param_types)
-                    #print utils.TypeList.from_jts(c.param_types, self.module._L)
-                    #print utils.TypeList.from_jts(m_type, self.module._L)
+                    #print utils.TypeList.from_jts(c.param_types, self.module)
+                    #print utils.TypeList.from_jts(m_type, self.module)
                     print >>sys.stderr, '**********************************************'
                     #raw_input()
             '''
@@ -1995,7 +2233,7 @@ class ClassDef(object):
             for i in range(1, len(inner_splits)):
                 inner = '$'.join(inner_splits[:i+1])
                 outer = '$'.join(inner_splits[:i])
-                cl = self.module._L.load_class(inner)
+                cl = self.module.load_class(inner)
                 if 'interface' in cl.attrs:
                     print >>buf, '.inner interface %s inner %s outer %s' % (inner, inner, outer)
                 else:
@@ -2203,11 +2441,13 @@ class InterfaceMethodRef(object):
         return str(self)
 
 class ClassRef(object):
-    __slots__ = ['_loader', '_class_ref', 'offset', 'mod_index', 'package', 'class_', 'extra']
+    __slots__ = ['_loader', '_module', '_class_ref', 'offset', 'mod_index', 'package', 'class_', 'extra']
 
     def __init__(self, module, raw_cr):
         R = module._R
         self._loader = module._L
+        # the module in which the class reference resides
+        self._module = module
         self._class_ref = None
         self.offset = raw_cr._start
 
@@ -2218,8 +2458,38 @@ class ClassRef(object):
 
     def get_class(self):
         if self._class_ref is None:
-            self._class_ref = self._loader.load_class(str(self))
+            # why doesn't this work!?!!? the mod_index does not always correspond
+            # to an index into the imports table into this module's imports
+            '''
+            if self.mod_index == 0:
+                base_module_name = self._module.get_base_module_name()
+            else:
+                base_module_name = self._module.imports[self.mod_index - 1].get_base_module_name()
+            '''
+            # rather than using module.load_class, we need to do this to
+            # exploit the available mod_index
+            self._class_ref = self._module.load_class(
+                str(self),
+                preferred_mod_index = self.mod_index,
+            )
+            '''
+            # TODO: remove try..except
+            try:
+                self._class_ref = self._loader.load_class(base_module_name, str(self))
+            except:
+                self._loader.log('ERROR: class: %s' % str(self.class_))
+                self._loader.log('ERROR: package: %s' % str(self.package))
+                self._loader.log('ERROR: class ref module: %s' % str(self._module.name))
+                self._loader.log('ERROR: imports: %s' % str([x.name for x in self._module.imports]))
+                self._loader.log('ERROR: siblings: %s' % str(self._module.imports[self.mod_index - 1].siblings))
+                self._loader.log('ERROR: module index: %s' % str(self.mod_index))
+                self._loader.log('ERROR: extra: %s' % str(self.extra))
+                self._loader.log('ERROR: module: %s' % self._module.imports[self.mod_index - 1].name)
+                self._loader.log('ERROR: base module: %s' % base_module_name)
+                raise
+            '''
             del self._loader
+            del self._module
         return self._class_ref
 
     def __str__(self):
