@@ -312,14 +312,17 @@ class Cod2Jar(object):
         print
         return loaded_cods
 
-    def _load_all_cached_cods(self):
-        # Load all the modules in the module cache (either folder or Zip cache)
+    def _get_cached_module_names(self):
+        assert self._cache_root, "ERROR: no cache specified for cache operations"
         if zipfile.is_zipfile(self._cache_root):
             ZF = zipfile.ZipFile(self._cache_root, 'r')
-            mods = [mod[:-7] for mod in ZF.namelist() if mod.endswith(".cod.db")]
+            return [mod[:-7] for mod in ZF.namelist() if mod.endswith(".cod.db")]
         else:
-            mods = [os.path.basename(mod)[:-7] for mod in glob.glob(os.path.join(self._cache_root, "*.cod.db"))]
+            return  [os.path.basename(mod)[:-7] for mod in glob.glob(os.path.join(self._cache_root, "*.cod.db"))]
 
+    def _load_all_cached_cods(self):
+        # Load all the modules in the module cache (either folder or Zip cache)
+        mods = self._get_cached_module_names()
         P = Progress("Lazy-Loading CODs", len(mods))
         loaded_mods = []
         ticks = 0
@@ -489,7 +492,10 @@ class Cod2Jar(object):
             If we do run out of memory, we simply clear out the
             loader and try again on the current module.
         """
-        cods_to_dump = self._cods
+        if self._cods:
+            cods_to_dump = self._cods
+        else:
+            cods_to_dump = self._get_cached_module_names()
         cods_to_dump.sort()
 
         if self._hiscan:
@@ -500,7 +506,9 @@ class Cod2Jar(object):
         P.update(ticks)
         while cods_to_dump:
             if len(self._loader._modules) > self.max_module_count:
-                self.log("WARNING: flushing loader with %d CODs loaded, aborting..." % len(self._loader._modules))
+                self.log("WARNING: flushing loader with %d CODs loaded..." % len(self._loader._modules))
+                del self._loader
+                gc.collect()
                 self._loader = codlib.Loader(
                     self._load_paths,
                     cache_root=self._cache_root,
@@ -508,7 +516,6 @@ class Cod2Jar(object):
                     auto_resolve=True,
                     log_file=self._loader_log
                 )
-                gc.collect()
             cod_name = cods_to_dump.pop(0)
             self.log("Dumping '%s'" % os.path.basename(cod_name))
             try:
@@ -542,8 +549,6 @@ class Cod2Jar(object):
             except MemoryError:
                 # urgh, ran out of memory, bail...
                 self.log("ERROR: ran out of memory on module '%s' with %d CODs loaded, aborting..." % (cod_name, len(self._loader._modules)))
-                del self._loader
-                gc.collect()
                 sys.exit(1)
             except KeyboardInterrupt:
                 raise
