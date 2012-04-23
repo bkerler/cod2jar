@@ -214,11 +214,15 @@ class Loader(object):
             for filename in os.listdir(search_path):
                 cod_path = os.path.join(search_path, filename)
                 if cod_path.endswith('.cod') and os.path.isfile(cod_path):
+                    # give it the file name just in case it is different
+                    # this could lead to bad times if we mistakenly name a cod
+                    # the same as another, but if we just use the embedded names
+                    # (as we should) then we will be fine
+                    if filename[:-4] not in self._module_path_map:
+                        self._module_path_map[filename[:-4]] = cod_path
+                    # do the embedded names next, these are authoritative!
                     for name in utils.quick_get_module_names(cod_path):
                         self._module_path_map[name] = cod_path
-                    # also give it the file name just in case it is different
-                    # this could lead to bad times if we mistakenly name a cod
-                    self._module_path_map[filename[:-4]] = cod_path
 
     def _init_module_cache_map(self):
         if self.cache_root is not None:
@@ -365,7 +369,7 @@ class Loader(object):
         
         # replace it with the actual name if it is an aliased name
         if filename in self._module_path_map:
-                filename = self._module_path_map[filename]
+            filename = self._module_path_map[filename]
         if self.cache_root is not None:
             if filename in self._module_cache_map:
                 filename = self._module_cache_map[filename]
@@ -603,7 +607,10 @@ class Loader(object):
 
         # Populate all basic fields
         cd.name = C['name']
-        cd.package = C['name'].rsplit('/', 1)[0]
+        if '/' in cd.name:
+            cd.package = C['name'].rsplit('/', 1)[0]
+        else:
+            cd.package = ''
         cd.attrs = dict((a, a) for a in C['attrs'])
 
         # Populate simple type-based fields
@@ -2226,6 +2233,15 @@ class ClassDef(object):
         #print >>buf, '.debug "<debug_source_extension1>"'
         #print >>buf, '.debug "<debug_source_extension2>"'
 
+        # we don't fully understand inner classes here...
+        # for instance, the following two classes definitely exist:
+        #     net/rim/device/apps/internal/mms/service/BackgroundTaskThread
+        #     net/rim/device/apps/internal/mms/service/BackgroundTaskThread$1$TaskAppendingRunnable
+        # however, the following class definitely does not exist (but it should according to the name!):
+        #     net/rim/device/apps/internal/mms/service/BackgroundTaskThread$1
+        # because this class does not exist, we can't find it with load_class and we crash
+        # so we must temporarily disable inner class specification until we can figure this out...
+        '''
         # if this class is an inner class or has inner classes
         if 'is_inner' in self.attrs:
             # outer classes
@@ -2249,6 +2265,7 @@ class ClassDef(object):
                     print >>buf, '.inner interface %s inner %s outer %s' % (inner, inner, outer)
                 else:
                     print >>buf, '.inner class %s inner %s outer %s' % (inner, inner, outer)
+        '''
 
         print >>buf, ""
         for field in self.fields:
