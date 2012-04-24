@@ -395,10 +395,10 @@ class Loader(object):
         '''Check the load path/cache for a module name, currently loaded or not.'''
         if isinstance(item, basestring):
             cod_name = os.path.split(item)[1]
-            if not cod_name.endswith('.cod'):
-                cod_name += cod_name[:-4]
-            elif not cod_name.endswith('.cod.db'):
-                cod_name += cod_name[:-7]
+            if cod_name.endswith('.cod'):
+                cod_name = cod_name[:-4]
+            elif cod_name.endswith('.cod.db'):
+                cod_name = cod_name[:-7]
 
             if cod_name in self._module_path_map:
                 return True
