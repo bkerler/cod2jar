@@ -704,10 +704,10 @@ class HIScanner(object):
     _bastore = _iastore = _castore = _aastore = _sastore = __pop3
     
     _iconst_1 = _iconst_0 = __push_int
-    _bipush = _sipush = _iipush = _iload = __push_int
+    _bipush = _sipush = _iipush = _iload = _iload_wide = __push_int
     _iload_0 = _iload_1 = _iload_2 = _iload_3 = _iload_4 = _iload_5 = _iload_6 = _iload_7 = __push_int
 
-    _lload = _lipush = __push_long
+    _lload = _lload_wide = _lipush = __push_long
     
     _dconst_0 = _dconst_1 = __push_double
     _fconst_0 = _fconst_1 = _fconst_2 = __push_float
@@ -733,6 +733,7 @@ class HIScanner(object):
     # Push the type in that <tlocals> slot
     def _aload(self, instr, tstack, tlocals):
         tstack.push(tlocals[instr.operands[0]])
+    _aload_wide = _aload
     
     def _aload_0(self, instr, tstack, tlocals):
         tstack.push(tlocals[0])
@@ -757,9 +758,11 @@ class HIScanner(object):
             tlocals[instr.operands[0]] = self._tt['float']
         else:
             tlocals[instr.operands[0]] = self._tt['int']
+    _istore_wide = _istore
     
     def _astore(self, instr, tstack, tlocals):
         tlocals[instr.operands[0]] = tstack.pop()
+    _astore_wide = _astore
     
     def _lstore(self, instr, tstack, tlocals):
         tstack.pop(2)
@@ -768,6 +771,7 @@ class HIScanner(object):
             tlocals[local_index] = tlocals[local_index+1] = self._tt['double']
         else:
             tlocals[local_index] = tlocals[local_index+1] = self._tt['long']
+    _lstore_wide = _lstore
     
     def _istore_0(self, instr, tstack, tlocals):
         if self._reals:
@@ -843,7 +847,10 @@ class HIScanner(object):
             totos = tstack.top()
             
             # Can we look up the field by index within TOTOS?
-            if (totos.type is None) or (not hasattr(totos.type, 'fft')) or (len(totos.type.fft) <= field):
+            if (totos.type is None):
+                # No way to know what goes here
+                raise FieldPatchFailed("field lookup (%r) on unresolvable stack type" % instr)
+            elif (not hasattr(totos.type, 'fft')) or (len(totos.type.fft) <= field):
                 # No way to know what goes here
                 raise FieldPatchFailed("field lookup (%r) on unhelpful stack type (%s)" % (instr, totos))
             else:
@@ -857,12 +864,19 @@ class HIScanner(object):
                     raise FieldPatchFailed("error looking up field %d for type %s" % (field, cdef))
                 
                 # Replace classref type with field type
-                tstack.pop_push(fdef.type[0])
+                field_type = fdef.type[0]
+                tstack.pop_push(field_type)
+                
+                # check if it is a long access or not
+                if 'lget' in instr._name:
+                    assert str(field_type) in 'JD', 'ERROR: expected category 2 computational type, instead got %s' % str(field_type)
+                else:
+                    assert str(field_type) not in 'JD', 'ERROR: expected category 1 computational type, instead got %s' % str(field_type)
                 
                 # Also, patchup the instruction's operand list accordingly
                 instr.operands[0] = fdef
                 self.count("fields")
-    _lgetfield = _getfield
+    _lgetfield = _lgetfield_wide = _getfield_wide = _getfield
 
     def _lreturn(self, instr, tstack, tlocals):
         totos = tstack.top()
@@ -914,10 +928,18 @@ class HIScanner(object):
         # Equivalent to "push tlocal[0]; getfield BLAH"
         tstack.push(tlocals[0])
         self._getfield(instr, tstack, tlocals)
+    _aload_0_getfield_wide = _aload_0_getfield
 
     def _getstatic(self, instr, tstack, tlocals):
         if hasattr(instr.operands[0], 'type'):
-            tstack.push(instr.operands[0].type[0])
+            field_type = instr.operands[0].type[0]
+            tstack.push(field_type)
+            
+            # check if it is a long access or not
+            if 'lget' in instr._name:
+                assert str(field_type) in 'JD', 'ERROR: expected category 2 computational type, instead got %s' % str(field_type)
+            else:
+                assert str(field_type) not in 'JD', 'ERROR: expected category 1 computational type, instead got %s' % str(field_type)
         else:
             # Then we just don't know!
             self.log("WARNING: unknown static field '%s' for 'getstatic'; pushing *" % instr.operands[0])
