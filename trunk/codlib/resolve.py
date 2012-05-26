@@ -695,11 +695,13 @@ class Loader(object):
                         return base_module_name
 
         # what the?!
+        '''
         with open("classdump.txt", 'wt') as fd:
             for mname in self._classes:
                 for cname in self._classes[mname]:
                     if cname not in [None, 'None']:
                         print >> fd, mname, cname
+        '''
         raise(LoadError("Could not locate class '%s' from module dependencies of %s" % (classpath, module.name)))
    
     def ref_class(self, base_module_name, name):
@@ -1001,7 +1003,7 @@ class Resolver(object):
 
         # Unless the mod byte is 0 (local) or 255 (???) or a sibling
         if mod_byte not in (0, 255) and \
-           M.imports[mod_byte - 1].name not in M.siblings:
+            M.imports[mod_byte - 1].name not in M.siblings:
             # Otherwise, start with a Class-Ref list lookup
             # class_byte maxes out at 255, while index may be > 255
             # Ergo, we must check all indices such that (index & 0xff) == class_byte
